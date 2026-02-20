@@ -4,7 +4,10 @@ import threading
 import socket
 import logging
 
-import pyaudiowpatch as pyaudio
+try:
+    import pyaudiowpatch as pyaudio  # type: ignore[reportMissingImports]
+except ImportError:
+    import pyaudio  # type: ignore[reportMissingModuleSource]
 import numpy as np
 import zstandard as zstd
 

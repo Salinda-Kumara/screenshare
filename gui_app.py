@@ -36,9 +36,9 @@ import mss
 import zstandard as zstd
 
 try:
-    import pyaudiowpatch as pyaudio
+    import pyaudiowpatch as pyaudio  # type: ignore[reportMissingImports]
 except ImportError:
-    import pyaudio
+    import pyaudio  # type: ignore[reportMissingModuleSource]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
