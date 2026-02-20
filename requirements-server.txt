@@ -1,0 +1,2 @@
+# Relay server only needs the framing protocol dependency
+zstandard>=0.21.0

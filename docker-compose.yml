@@ -1,0 +1,24 @@
+# LAN Screen Share — Docker Compose (Relay Server)
+#
+# Quick start:
+#   docker compose up              # start relay server
+#   docker compose up -d           # start in background
+#   docker compose down            # stop
+#
+# The relay server accepts sharers and viewers.
+# Clients auto-discover it on the LAN or connect by IP.
+#
+# Ports:
+#   9876/udp  - LAN discovery
+#   9877/tcp  - Screen relay
+#   9878/tcp  - Audio relay
+#   9879/tcp  - Control / signaling
+
+services:
+  relay:
+    build: .
+    container_name: lanscreenshare-relay
+    restart: unless-stopped
+    network_mode: host
+    stdin_open: true
+    tty: true

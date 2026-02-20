@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lanscreenshare"
+version = "2.0.0"
+description = "LAN Screen & Audio sharing for meetings — relay server + sharers/viewers"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "Pillow>=10.0.0",
+    "numpy>=1.24.0",
+    "PyAudioWPatch>=0.2.12",
+    "opencv-python>=4.8.0",
+    "zstandard>=0.21.0",
+    "mss>=9.0.0",
+]
+
+[project.scripts]
+lanshare = "gui_app:main"
+lanshare-server = "relay_server:main"
+
+[tool.setuptools]
+py-modules = [
+    "config",
+    "network_utils",
+    "discovery",
+    "relay_server",
+    "gui_app",
+]
