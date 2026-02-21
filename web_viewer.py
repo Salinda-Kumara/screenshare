@@ -194,22 +194,32 @@ class RelayBridge:
                     is_jpeg = len(data) >= 2 and data[0] == 0xFF and data[1] == 0xD8
 
                     if is_ebml:
+                        log.info("Stream init segment received (%d bytes)", len(data))
                         self.stream_init_segment = data
                         self._chunk_queue.clear()
                         self._is_stream = True
+                        # Don't add init segment to chunk queue;
+                        # it's sent separately to each viewer on connect.
+                        with self._frame_lock:
+                            self.latest_frame = data
+                            self.frame_seq += 1
                     elif is_jpeg:
                         self._is_stream = False
                         self.stream_init_segment = None
                         self._chunk_queue.clear()
+                        with self._frame_lock:
+                            self.latest_frame = data
+                            self.frame_seq += 1
+                    else:
+                        # WebM cluster data or other stream chunks
+                        with self._frame_lock:
+                            self.latest_frame = data
+                            self.frame_seq += 1
+                            if self._is_stream:
+                                self._chunk_queue.append((self.frame_seq, data))
 
-                    with self._frame_lock:
-                        self.latest_frame = data
-                        self.frame_seq += 1
-                        if self._is_stream:
-                            self._chunk_queue.append((self.frame_seq, data))
-
-                    self._frame_event.set()  # wake up waiting WS handlers
-                    self._signal_viewers()  # notify async viewer handlers
+                    self._frame_event.set()
+                    self._signal_viewers()
 
             except Exception as exc:
                 if self.running:
@@ -493,6 +503,9 @@ class WebViewerApp:
         if self.bridge._is_stream and self.bridge.stream_init_segment:
             try:
                 await ws.send_bytes(self.bridge.stream_init_segment)
+                # Skip past any chunks already in queue to avoid duplication
+                last_seq = self.bridge.frame_seq
+                log.info("Sent stream init segment to viewer, starting from seq=%d", last_seq)
             except Exception:
                 pass
 

@@ -632,7 +632,24 @@
         let sbQueue = [];
         let sbReady = false;
 
+        function flushQueue() {
+            if (!sourceBuffer || sourceBuffer.updating || sbQueue.length === 0) return;
+            // Drop old chunks if queue backed up (keep latest 30 = ~3 sec)
+            if (sbQueue.length > 30) {
+                console.warn('MSE queue overflow, dropping', sbQueue.length - 10, 'old chunks');
+                sbQueue.splice(0, sbQueue.length - 10);
+            }
+            try {
+                sourceBuffer.appendBuffer(sbQueue.shift());
+            } catch (e) {
+                console.warn('SourceBuffer append error:', e);
+                sbQueue.length = 0;
+            }
+        }
+
         function initStreamMode(initSegment) {
+            console.log('Initializing MSE stream mode, init segment:', initSegment.byteLength, 'bytes');
+
             // Create <video> element over the canvas
             videoEl = document.createElement('video');
             videoEl.autoplay = true;
@@ -644,68 +661,88 @@
 
             mediaSource = new MediaSource();
             videoEl.src = URL.createObjectURL(mediaSource);
-            sbQueue.push(initSegment);
 
             mediaSource.addEventListener('sourceopen', () => {
-                // Match codec to what sharer sends (try vp9 first)
-                let codec = 'video/webm; codecs="vp9"';
-                if (!MediaSource.isTypeSupported(codec)) {
-                    codec = 'video/webm; codecs="vp8"';
+                console.log('MediaSource opened');
+                // Try codecs in order
+                const codecs = [
+                    'video/webm; codecs="vp9"',
+                    'video/webm; codecs="vp8"',
+                    'video/webm',
+                ];
+                let codec = '';
+                for (const c of codecs) {
+                    if (MediaSource.isTypeSupported(c)) { codec = c; break; }
                 }
-                if (!MediaSource.isTypeSupported(codec)) {
-                    codec = 'video/webm';
+                if (!codec) {
+                    console.error('No supported WebM codec for MSE');
+                    teardownStreamMode();
+                    mode = null;
+                    return;
                 }
+                console.log('Using codec:', codec);
                 try {
                     sourceBuffer = mediaSource.addSourceBuffer(codec);
                 } catch (e) {
                     console.error('Failed to add SourceBuffer:', e);
+                    teardownStreamMode();
+                    mode = null;
                     return;
                 }
-                sourceBuffer.mode = 'sequence';
+                sourceBuffer.mode = 'segments';
 
                 sourceBuffer.addEventListener('updateend', () => {
-                    // Trim buffer to keep ~10 seconds
+                    // Trim buffer to keep ~8 seconds
                     try {
-                        if (sourceBuffer.buffered.length > 0) {
+                        if (!sourceBuffer.updating && sourceBuffer.buffered.length > 0) {
                             const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                            if (end > 15) {
-                                sourceBuffer.remove(0, end - 10);
+                            if (end > 12) {
+                                sourceBuffer.remove(0, end - 8);
                                 return;
                             }
                         }
                     } catch (_) {}
-
-                    // Append next queued chunk
-                    if (sbQueue.length > 0 && !sourceBuffer.updating) {
-                        try {
-                            sourceBuffer.appendBuffer(sbQueue.shift());
-                        } catch (e) {
-                            console.warn('SourceBuffer append error:', e);
-                            sbQueue.length = 0;
-                        }
-                    }
+                    flushQueue();
                 });
 
-                // Mark ready and start appending
+                sourceBuffer.addEventListener('error', (e) => {
+                    console.error('SourceBuffer error:', e);
+                });
+
+                // Append init segment immediately
                 sbReady = true;
-                if (sbQueue.length > 0 && !sourceBuffer.updating) {
-                    try {
-                        sourceBuffer.appendBuffer(sbQueue.shift());
-                    } catch (_) {}
+                try {
+                    sourceBuffer.appendBuffer(initSegment);
+                    console.log('Init segment appended');
+                } catch (e) {
+                    console.error('Failed to append init segment:', e);
                 }
             });
 
             videoEl.addEventListener('loadedmetadata', () => {
+                console.log('Video metadata loaded:', videoEl.videoWidth, 'x', videoEl.videoHeight);
                 sbRes.textContent = videoEl.videoWidth + "\u00D7" + videoEl.videoHeight;
+                // Ensure playback starts
+                videoEl.play().catch(() => {});
             });
 
-            // Keep playback close to live edge (minimize latency)
+            // Keep playback close to live edge
             videoEl.addEventListener('timeupdate', () => {
                 if (videoEl.buffered.length > 0) {
                     const liveEdge = videoEl.buffered.end(videoEl.buffered.length - 1);
-                    if (liveEdge - videoEl.currentTime > 1.5) {
-                        videoEl.currentTime = liveEdge - 0.3;
+                    if (liveEdge - videoEl.currentTime > 2.0) {
+                        videoEl.currentTime = liveEdge - 0.5;
                     }
+                    sbRes.textContent = videoEl.videoWidth + "\u00D7" + videoEl.videoHeight;
+                }
+            });
+
+            // Auto-play recovery
+            videoEl.addEventListener('stalled', () => {
+                if (videoEl.buffered.length > 0) {
+                    const liveEdge = videoEl.buffered.end(videoEl.buffered.length - 1);
+                    videoEl.currentTime = liveEdge - 0.2;
+                    videoEl.play().catch(() => {});
                 }
             });
         }
@@ -715,7 +752,7 @@
                 if (sbQueue.length < 200) sbQueue.push(data);
                 return;
             }
-            if (sourceBuffer.updating) {
+            if (sourceBuffer.updating || sbQueue.length > 0) {
                 if (sbQueue.length < 200) sbQueue.push(data);
             } else {
                 try {
@@ -727,10 +764,10 @@
         }
 
         function teardownStreamMode() {
+            sbReady = false;
             if (videoEl) {
                 videoEl.pause();
-                videoEl.removeAttribute('src');
-                videoEl.load();
+                try { videoEl.removeAttribute('src'); videoEl.load(); } catch (_) {}
                 videoEl.remove();
                 videoEl = null;
             }
@@ -740,7 +777,6 @@
             mediaSource = null;
             sourceBuffer = null;
             sbQueue = [];
-            sbReady = false;
             canvas.style.display = '';
         }
 
@@ -753,11 +789,9 @@
             const isJPEG = bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xD8;
             const isEBML = bytes.length >= 4 && bytes[0] === 0x1A && bytes[1] === 0x45 && bytes[2] === 0xDF && bytes[3] === 0xA3;
 
-            // Handle mode switch
-            if (isJPEG && mode !== 'jpeg') {
+            if (isEBML) {
+                // WebM init segment — (re)initialize MSE
                 if (mode === 'stream') teardownStreamMode();
-                mode = 'jpeg';
-            } else if (isEBML && mode !== 'stream') {
                 mode = 'stream';
                 initStreamMode(data);
                 overlay.classList.add("hidden");
@@ -765,11 +799,18 @@
                 return;
             }
 
+            if (isJPEG) {
+                // Switch to JPEG mode if not already
+                if (mode === 'stream') teardownStreamMode();
+                mode = 'jpeg';
+            }
+
             if (mode === 'stream') {
+                // WebM cluster or other stream data — append to MSE
                 appendStreamChunk(data);
                 overlay.classList.add("hidden");
                 frameCount++;
-            } else {
+            } else if (mode === 'jpeg' || isJPEG) {
                 // JPEG canvas rendering
                 if (rendering) return;
                 rendering = true;
@@ -787,9 +828,10 @@
                     sbRes.textContent = bmp.width + "\u00D7" + bmp.height;
                     overlay.classList.add("hidden");
                     frameCount++;
-                } catch (_) { /* ignore decode errors */ }
+                } catch (_) {}
                 rendering = false;
             }
+            // else: unknown data while mode=null, ignore (will get init segment soon)
         };
 
         ws.onclose = () => {
