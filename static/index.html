@@ -1146,10 +1146,56 @@
         const offCtx = offCanvas.getContext("2d", { alpha: false });
 
         let sending = false;
-        let lastW = 0, lastH = 0;  // Track size to avoid resetting canvas each frame
+        let lastW = 0, lastH = 0;
 
-        // Use a Web Worker for timing so capture continues in background tabs
-        // Worker accepts 'start_<ms>' to change interval dynamically
+        // ── Encoding Worker ──
+        // JPEG encoding via OffscreenCanvas in a Worker — NOT throttled
+        // when the browser tab is in the background.
+        const useWorkerEncoder = typeof OffscreenCanvas !== 'undefined';
+        let encoderWorker = null;
+
+        if (useWorkerEncoder) {
+            const encoderCode = `
+                let oc = null, octx = null;
+                onmessage = async (e) => {
+                    const { bmp, quality } = e.data;
+                    const w = bmp.width, h = bmp.height;
+                    if (!oc || oc.width !== w || oc.height !== h) {
+                        oc = new OffscreenCanvas(w, h);
+                        octx = oc.getContext('2d', { alpha: false });
+                    }
+                    octx.drawImage(bmp, 0, 0);
+                    bmp.close();
+                    try {
+                        const blob = await oc.convertToBlob({ type: 'image/jpeg', quality });
+                        const buf = await blob.arrayBuffer();
+                        postMessage(buf, [buf]);
+                    } catch (err) {
+                        postMessage(null);
+                    }
+                };
+            `;
+            const encBlob = new Blob([encoderCode], { type: 'application/javascript' });
+            const encUrl = URL.createObjectURL(encBlob);
+            encoderWorker = new Worker(encUrl);
+            URL.revokeObjectURL(encUrl);
+
+            encoderWorker.onmessage = (e) => {
+                const buf = e.data;
+                if (buf && sharing && shareScreenWs && shareScreenWs.readyState === WebSocket.OPEN) {
+                    lastFrameSize = buf.byteLength;
+                    avgFrameSize = avgFrameSize ? avgFrameSize * 0.8 + buf.byteLength * 0.2 : buf.byteLength;
+                    if (shareScreenWs.bufferedAmount > buf.byteLength * 2) {
+                        sending = false;
+                        return;
+                    }
+                    try { shareScreenWs.send(buf); } catch(_) {}
+                }
+                sending = false;
+            };
+        }
+
+        // ── Timer Worker ──
         const workerCode = `
             let iv = null;
             onmessage = (e) => {
@@ -1167,16 +1213,41 @@
         URL.revokeObjectURL(workerUrl);
         _activeTimerWorker = timerWorker;
 
+        // ── Auto-adjust when tab goes to background ──
+        let _bgSavedSettings = null;
+        function onVisChange() {
+            if (!sharing) return;
+            if (document.hidden) {
+                // Save current settings and lower quality for background
+                _bgSavedSettings = { maxDim: shareSettings.maxDim, jpegQ: shareSettings.jpegQ, fps: shareSettings.fps };
+                const bgDim = Math.min(shareSettings.maxDim, 1280);
+                const bgQ   = Math.min(shareSettings.jpegQ, 0.45);
+                const bgFps = Math.min(shareSettings.fps, 15);
+                shareSettings.maxDim = bgDim;
+                shareSettings.jpegQ  = bgQ;
+                shareSettings.fps    = bgFps;
+                _applySettingsToWorker();
+            } else if (_bgSavedSettings) {
+                // Restore original settings when tab returns to foreground
+                shareSettings.maxDim = _bgSavedSettings.maxDim;
+                shareSettings.jpegQ  = _bgSavedSettings.jpegQ;
+                shareSettings.fps    = _bgSavedSettings.fps;
+                _bgSavedSettings = null;
+                _applySettingsToWorker();
+                syncSettingsUI();
+            }
+        }
+        document.addEventListener('visibilitychange', onVisChange);
+
+        // ── Capture loop ──
         function captureFrame() {
             if (!sharing || sending) return;
             if (video.videoWidth === 0) return;
             if (!shareScreenWs || shareScreenWs.readyState !== WebSocket.OPEN) return;
 
-            // Read live settings
             const MAX_DIM = shareSettings.maxDim;
             const JPEG_Q  = shareSettings.jpegQ;
 
-            // Scale down if needed for faster encoding/transmission
             let w = video.videoWidth;
             let h = video.videoHeight;
             if (w > MAX_DIM || h > MAX_DIM) {
@@ -1185,7 +1256,6 @@
                 h = Math.round(h * scale);
             }
 
-            // Only resize canvas when dimensions change (avoids costly clear)
             if (lastW !== w || lastH !== h) {
                 offCanvas.width = w;
                 offCanvas.height = h;
@@ -1195,7 +1265,7 @@
 
             offCtx.drawImage(video, 0, 0, w, h);
 
-            // Draw software cursor onto the frame
+            // Draw software cursor
             if (shareCursorX >= 0 && shareCursorY >= 0) {
                 let cx, cy;
                 const scaleX = w / video.videoWidth;
@@ -1211,24 +1281,31 @@
             }
 
             sending = true;
-            offCanvas.toBlob((blob) => {
-                if (blob && sharing && shareScreenWs && shareScreenWs.readyState === WebSocket.OPEN) {
-                    // Track frame size for stats
-                    lastFrameSize = blob.size;
-                    avgFrameSize = avgFrameSize ? avgFrameSize * 0.8 + blob.size * 0.2 : blob.size;
-                    // Skip if network is congested (>2 frames queued)
-                    if (shareScreenWs.bufferedAmount > blob.size * 2) {
+
+            if (encoderWorker) {
+                // Worker path: grab ImageBitmap (fast, sync-ish), encode in Worker
+                createImageBitmap(offCanvas).then(bmp => {
+                    encoderWorker.postMessage({ bmp, quality: JPEG_Q }, [bmp]);
+                }).catch(() => { sending = false; });
+            } else {
+                // Fallback: encode on main thread (throttled in background tabs)
+                offCanvas.toBlob((blob) => {
+                    if (blob && sharing && shareScreenWs && shareScreenWs.readyState === WebSocket.OPEN) {
+                        lastFrameSize = blob.size;
+                        avgFrameSize = avgFrameSize ? avgFrameSize * 0.8 + blob.size * 0.2 : blob.size;
+                        if (shareScreenWs.bufferedAmount > blob.size * 2) {
+                            sending = false;
+                            return;
+                        }
+                        blob.arrayBuffer().then(buf => {
+                            try { shareScreenWs.send(buf); } catch(_) {}
+                            sending = false;
+                        });
+                    } else {
                         sending = false;
-                        return;
                     }
-                    blob.arrayBuffer().then(buf => {
-                        try { shareScreenWs.send(buf); } catch(_) {}
-                        sending = false;
-                    });
-                } else {
-                    sending = false;
-                }
-            }, "image/jpeg", JPEG_Q);
+                }, "image/jpeg", JPEG_Q);
+            }
         }
 
         timerWorker.onmessage = captureFrame;
@@ -1248,8 +1325,16 @@
         shareCaptureId = {
             cancel() {
                 _activeTimerWorker = null;
+                document.removeEventListener('visibilitychange', onVisChange);
+                if (_bgSavedSettings) {
+                    shareSettings.maxDim = _bgSavedSettings.maxDim;
+                    shareSettings.jpegQ  = _bgSavedSettings.jpegQ;
+                    shareSettings.fps    = _bgSavedSettings.fps;
+                    _bgSavedSettings = null;
+                }
                 timerWorker.postMessage("stop");
                 timerWorker.terminate();
+                if (encoderWorker) encoderWorker.terminate();
             }
         };
     }
