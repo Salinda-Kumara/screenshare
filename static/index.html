@@ -385,6 +385,15 @@
     <button class="btn-big danger hidden" id="share-stop-btn">Stop Sharing</button>
     <button class="btn-big" id="share-close-btn" style="background:#333;border-color:#555">Cancel</button>
     <div class="share-status hidden" id="share-status"></div>
+
+    <!-- Diagnostics section -->
+    <div style="margin-top:12px; border-top:1px solid #444; padding-top:8px">
+        <button class="btn-big" id="diag-btn" style="background:#2a4a2a;border-color:#4a8a4a;font-size:0.85em;padding:6px 12px"
+                onclick="runDiagnostics()">&#x1F50D; Run Diagnostics</button>
+        <pre id="diag-output" style="margin-top:8px;font-size:0.75em;color:#89b4fa;background:#1a1a2e;
+            padding:8px;border-radius:6px;white-space:pre-wrap;word-break:break-all;max-height:200px;
+            overflow-y:auto;display:none"></pre>
+    </div>
 </div>
 
 <!-- ═══ Settings Panel ═══ -->
@@ -1011,6 +1020,112 @@
         }
     }
     fetchRtcConfig();
+
+    // ── Diagnostics ──
+    window.runDiagnostics = async function() {
+        const out = document.getElementById("diag-output");
+        out.style.display = "block";
+        out.textContent = "Running diagnostics...\n";
+
+        function log(msg) { out.textContent += msg + "\n"; out.scrollTop = out.scrollHeight; }
+
+        // 1) Check /api/debug
+        try {
+            const r = await fetch("/api/debug");
+            const d = await r.json();
+            log("✅ Server reachable");
+            log("   Build version: " + (d.build_version || "unknown (OLD CODE?)"));
+            log("   Relay host: " + d.relay_host);
+            log("   Bridge control_connected: " + d.bridge.control_connected);
+            log("   Bridge screen_connected: " + d.bridge.screen_connected);
+            log("   Sharers: " + JSON.stringify(d.bridge.sharers));
+            log("   Active sharer: " + d.bridge.active_sharer_id);
+            log("   Frame seq: " + d.bridge.frame_seq);
+            if (!d.bridge.control_connected) {
+                log("⚠️  Bridge control NOT connected — relay_server may not be running!");
+            }
+        } catch (e) {
+            log("❌ Cannot reach /api/debug: " + e.message);
+            return;
+        }
+
+        // 2) Test relay connection
+        log("\nTesting relay handshake...");
+        try {
+            const r = await fetch("/api/test-relay");
+            const d = await r.json();
+            if (d.success) {
+                log("✅ Relay handshake OK: " + d.message);
+            } else {
+                log("❌ Relay handshake FAILED: " + d.message);
+            }
+            for (const step of (d.steps || [])) {
+                log("   " + step.step + ": " + step.status +
+                    (step.error ? " — " + step.error : "") +
+                    (step.sharer_id != null ? " (sharer_id=" + step.sharer_id + ")" : ""));
+            }
+        } catch (e) {
+            log("❌ Cannot reach /api/test-relay: " + e.message);
+        }
+
+        // 3) Test WebSocket connectivity
+        log("\nTesting WebSocket...");
+        try {
+            const proto = location.protocol === "https:" ? "wss:" : "ws:";
+            const testWs = new WebSocket(
+                `${proto}//${location.host}/ws/share/screen?name=__diag_test__`);
+            testWs.binaryType = "arraybuffer";
+
+            const result = await new Promise((resolve) => {
+                const timeout = setTimeout(() => {
+                    testWs.close();
+                    resolve({ok: false, error: "Timeout (5s)"});
+                }, 5000);
+
+                testWs.onopen = () => {
+                    log("   WebSocket opened OK");
+                };
+                testWs.onmessage = (ev) => {
+                    clearTimeout(timeout);
+                    try {
+                        const msg = JSON.parse(ev.data);
+                        if (msg.type === "connected") {
+                            testWs.close();
+                            resolve({ok: true, sharer_id: msg.sharer_id});
+                        } else {
+                            testWs.close();
+                            resolve({ok: false, error: "Unexpected: " + ev.data});
+                        }
+                    } catch(e) {
+                        testWs.close();
+                        resolve({ok: false, error: e.message});
+                    }
+                };
+                testWs.onerror = (ev) => {
+                    clearTimeout(timeout);
+                    resolve({ok: false, error: "WebSocket error"});
+                };
+                testWs.onclose = (ev) => {
+                    clearTimeout(timeout);
+                    if (!ev.wasClean || ev.code === 1011) {
+                        resolve({ok: false, error: "WS closed code=" + ev.code + " reason=" + ev.reason});
+                    }
+                };
+            });
+
+            if (result.ok) {
+                log("✅ Full share handshake OK — sharer_id=" + result.sharer_id);
+                log("   Your browser CAN share. The share panel should work.");
+            } else {
+                log("❌ Share handshake FAILED: " + result.error);
+                log("   This means the relay server cannot register your share.");
+            }
+        } catch (e) {
+            log("❌ WebSocket test error: " + e.message);
+        }
+
+        log("\nDiagnostics complete.");
+    };
 
     shareBtn.addEventListener("click", () => {
         sharePanel.classList.toggle("hidden");

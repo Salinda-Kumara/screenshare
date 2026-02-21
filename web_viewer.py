@@ -48,6 +48,10 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Build marker — helps verify which code version is deployed
+import datetime as _dt
+BUILD_VERSION = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
+
 
 # ═══════════════════════════════════════════════════════════════
 #  RELAY BRIDGE — TCP connection to relay server, buffers data
@@ -305,23 +309,29 @@ class SharerBridge:
             configure_socket(sock)
             sock.settimeout(CONNECT_TIMEOUT)
             sock.connect((self.host, self.screen_port))
-            sock.settimeout(None)
+            log.info("SharerBridge TCP connected to %s:%d", self.host, self.screen_port)
 
             # Send role
             sock.sendall(ROLE_SHARER)
+            log.info("SharerBridge sent ROLE_SHARER")
 
             # Send sharer info
             info = json.dumps({"name": self.sharer_name}).encode("utf-8")
             send_frame(sock, info)
+            log.info("SharerBridge sent sharer info: %s", self.sharer_name)
 
-            # Read back sharer_id assigned by relay
+            # Read back sharer_id assigned by relay (with timeout)
+            sock.settimeout(10.0)  # 10s timeout for relay response
             try:
                 resp_data = recv_frame(sock)
                 resp = json.loads(resp_data.decode("utf-8"))
                 self.sharer_id = resp.get("sharer_id")
                 log.info("SharerBridge got sharer_id=%s", self.sharer_id)
-            except Exception:
-                log.warning("SharerBridge could not read sharer_id")
+            except Exception as exc:
+                log.warning("SharerBridge could not read sharer_id: %s", exc)
+
+            # Switch to generous timeout for ongoing frame sending
+            sock.settimeout(60.0)
 
             with self._screen_lock:
                 self._screen_sock = sock
@@ -432,6 +442,7 @@ class WebViewerApp:
         self.app.router.add_get("/api/status", self._handle_status)
         self.app.router.add_get("/api/rtc-config", self._handle_rtc_config)
         self.app.router.add_get("/api/debug", self._handle_debug)
+        self.app.router.add_get("/api/test-relay", self._handle_test_relay)
 
         static_dir = os.path.join(BASE_DIR, "static")
         if os.path.isdir(static_dir):
@@ -478,6 +489,7 @@ class WebViewerApp:
     async def _handle_debug(self, request):
         """Debug endpoint — shows full server state for troubleshooting."""
         return web.json_response({
+            "build_version": BUILD_VERSION,
             "relay_host": self.bridge.host,
             "screen_port": self.bridge.screen_port,
             "audio_port": self.bridge.audio_port,
@@ -494,6 +506,72 @@ class WebViewerApp:
             "rtc_rooms": list(self._rtc_rooms.keys()) if self._rtc_rooms else [],
             "webrtc_enabled": WEBRTC_ENABLED,
         })
+
+    async def _handle_test_relay(self, request):
+        """Actively test if we can connect to the relay server as a sharer.
+        Returns detailed step-by-step results for troubleshooting."""
+        results = {"relay_host": self.bridge.host, "steps": []}
+        steps = results["steps"]
+
+        loop = asyncio.get_event_loop()
+
+        def _test_relay_blocking():
+            """Run the full handshake test in a thread."""
+            import traceback
+            test_sock = None
+            try:
+                # Step 1: TCP connect
+                test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                configure_socket(test_sock)
+                test_sock.settimeout(5.0)
+                steps.append({"step": "tcp_connect",
+                              "target": f"{self.bridge.host}:{self.bridge.screen_port}",
+                              "status": "trying"})
+                test_sock.connect((self.bridge.host, self.bridge.screen_port))
+                steps[-1]["status"] = "ok"
+
+                # Step 2: Send ROLE_SHARER
+                steps.append({"step": "send_role", "status": "trying"})
+                test_sock.sendall(ROLE_SHARER)
+                steps[-1]["status"] = "ok"
+
+                # Step 3: Send sharer info
+                steps.append({"step": "send_info", "status": "trying"})
+                info = json.dumps({"name": "__test_probe__"}).encode("utf-8")
+                ok = send_frame(test_sock, info)
+                steps[-1]["status"] = "ok" if ok else "FAILED"
+
+                # Step 4: Receive sharer_id from relay
+                steps.append({"step": "recv_sharer_id", "status": "trying"})
+                test_sock.settimeout(5.0)
+                resp_data = recv_frame(test_sock)
+                resp = json.loads(resp_data.decode("utf-8"))
+                sid = resp.get("sharer_id")
+                steps[-1]["status"] = "ok"
+                steps[-1]["sharer_id"] = sid
+
+                results["success"] = True
+                results["message"] = f"Relay handshake OK — got sharer_id={sid}"
+            except Exception as exc:
+                steps.append({"step": "error", "status": "FAILED",
+                              "error": str(exc),
+                              "traceback": traceback.format_exc()})
+                results["success"] = False
+                results["message"] = f"Relay handshake FAILED: {exc}"
+            finally:
+                if test_sock:
+                    try:
+                        test_sock.close()
+                    except Exception:
+                        pass
+
+        await loop.run_in_executor(None, _test_relay_blocking)
+
+        # Also check bridge control status
+        results["bridge_control_connected"] = self.bridge.control_connected
+        results["bridge_sharers"] = self.bridge.sharers
+
+        return web.json_response(results)
 
     # ── Screen WebSocket ──
 
