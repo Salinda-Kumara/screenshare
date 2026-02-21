@@ -181,6 +181,13 @@ class RelayServer:
         log.info("Screen sharer connected: %s (id=%d) from %s", name, sharer_id, addr[0])
         self._broadcast_sharer_list()
 
+        # Send sharer_id back so client can link audio stream
+        try:
+            resp = json.dumps({"sharer_id": sharer_id}).encode("utf-8")
+            send_frame(sock, resp)
+        except Exception:
+            log.warning("Failed to send sharer_id to %s", name)
+
         try:
             while self.running:
                 frame = recv_frame(sock)

@@ -727,6 +727,7 @@
             setShareStatus("Screen WebSocket error", true);
         };
 
+        // Wait for WebSocket to open
         await new Promise((resolve, reject) => {
             shareScreenWs.onopen = resolve;
             shareScreenWs.onerror = reject;
@@ -736,11 +737,37 @@
             return;
         });
 
+        // Wait for sharer_id from server (sent as first message after screen WS connects)
+        let sharerId = null;
+        try {
+            sharerId = await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error("timeout")), 5000);
+                shareScreenWs.onmessage = (ev) => {
+                    clearTimeout(timeout);
+                    try {
+                        const msg = JSON.parse(ev.data);
+                        if (msg.type === "connected") {
+                            resolve(msg.sharer_id);
+                        } else {
+                            resolve(null);
+                        }
+                    } catch (_) { resolve(null); }
+                };
+            });
+        } catch (_) {
+            console.warn("Did not receive sharer_id from server");
+        }
+        // Clear the onmessage handler so it doesn't interfere
+        shareScreenWs.onmessage = null;
+
         // Connect audio WebSocket if we have audio tracks
         const audioTracks = shareStream.getAudioTracks();
         if (includeAudio && audioTracks.length > 0) {
-            shareAudioWs = new WebSocket(
-                `${proto}//${location.host}/ws/share/audio?name=${encodedName}`);
+            let audioUrl = `${proto}//${location.host}/ws/share/audio?name=${encodedName}`;
+            if (sharerId != null) {
+                audioUrl += `&sharer_id=${sharerId}`;
+            }
+            shareAudioWs = new WebSocket(audioUrl);
             shareAudioWs.binaryType = "arraybuffer";
             await new Promise((resolve) => {
                 shareAudioWs.onopen = resolve;
@@ -767,7 +794,11 @@
         document.removeEventListener('mouseleave', _onShareMouseLeave);
         shareCursorX = -1; shareCursorY = -1;
 
-        if (shareCaptureId) { clearInterval(shareCaptureId); shareCaptureId = null; }
+        if (shareCaptureId) {
+            if (shareCaptureId.cancel) shareCaptureId.cancel();
+            else clearInterval(shareCaptureId);
+            shareCaptureId = null;
+        }
         if (shareStream) {
             shareStream.getTracks().forEach(t => t.stop());
             shareStream = null;
@@ -844,33 +875,51 @@
         const offCanvas = document.createElement("canvas");
         const offCtx = offCanvas.getContext("2d");
 
-        const FPS = 15;
+        const MAX_DIM = 1280;  // Cap resolution for faster encoding
+        const MIN_INTERVAL = 50;  // ~20 FPS max
         let sending = false;
-        shareCaptureId = setInterval(() => {
-            if (!sharing || sending) return;
+        let lastSendTime = 0;
+        let rafId = null;
+
+        function captureLoop(ts) {
+            if (!sharing) return;
+            rafId = requestAnimationFrame(captureLoop);
+
+            if (sending) return;
+            if (ts - lastSendTime < MIN_INTERVAL) return;
             if (video.videoWidth === 0) return;
             if (!shareScreenWs || shareScreenWs.readyState !== WebSocket.OPEN) return;
 
-            offCanvas.width = video.videoWidth;
-            offCanvas.height = video.videoHeight;
-            offCtx.drawImage(video, 0, 0);
+            // Scale down if needed for faster encoding/transmission
+            let w = video.videoWidth;
+            let h = video.videoHeight;
+            if (w > MAX_DIM || h > MAX_DIM) {
+                const scale = MAX_DIM / Math.max(w, h);
+                w = Math.round(w * scale);
+                h = Math.round(h * scale);
+            }
+
+            offCanvas.width = w;
+            offCanvas.height = h;
+            offCtx.drawImage(video, 0, 0, w, h);
 
             // Draw software cursor onto the frame
             if (shareCursorX >= 0 && shareCursorY >= 0) {
                 let cx, cy;
+                const scaleX = w / video.videoWidth;
+                const scaleY = h / video.videoHeight;
                 if (shareSurface === 'browser') {
-                    // Tab capture: viewport coords → video coords
-                    cx = shareCursorX / window.innerWidth * video.videoWidth;
-                    cy = shareCursorY / window.innerHeight * video.videoHeight;
+                    cx = shareCursorX / window.innerWidth * w;
+                    cy = shareCursorY / window.innerHeight * h;
                 } else {
-                    // Screen/window capture: screen coords map directly
-                    cx = shareCursorX;
-                    cy = shareCursorY;
+                    cx = shareCursorX * scaleX;
+                    cy = shareCursorY * scaleY;
                 }
                 _drawCursorArrow(offCtx, cx, cy);
             }
 
             sending = true;
+            lastSendTime = ts;
             offCanvas.toBlob((blob) => {
                 if (blob && sharing && shareScreenWs && shareScreenWs.readyState === WebSocket.OPEN) {
                     blob.arrayBuffer().then(buf => {
@@ -880,8 +929,12 @@
                 } else {
                     sending = false;
                 }
-            }, "image/jpeg", 0.6);
-        }, 1000 / FPS);
+            }, "image/jpeg", 0.5);
+        }
+
+        rafId = requestAnimationFrame(captureLoop);
+        // Store cleanup handle — use shareCaptureId as an object for rAF
+        shareCaptureId = { cancel() { if (rafId) cancelAnimationFrame(rafId); rafId = null; } };
     }
 
     function _startAudioCapture(stream) {

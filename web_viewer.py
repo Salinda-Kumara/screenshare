@@ -280,6 +280,15 @@ class SharerBridge:
             info = json.dumps({"name": self.sharer_name}).encode("utf-8")
             send_frame(sock, info)
 
+            # Read back sharer_id assigned by relay
+            try:
+                resp_data = recv_frame(sock)
+                resp = json.loads(resp_data.decode("utf-8"))
+                self.sharer_id = resp.get("sharer_id")
+                log.info("SharerBridge got sharer_id=%s", self.sharer_id)
+            except Exception:
+                log.warning("SharerBridge could not read sharer_id")
+
             with self._screen_lock:
                 self._screen_sock = sock
             self.screen_connected = True
@@ -545,6 +554,13 @@ class WebViewerApp:
             await ws.close(code=1011, message=b"Cannot connect to relay server")
             return ws
 
+        # Store sharer bridge so audio WS can find it
+        sid = sharer.sharer_id
+        if sid is not None:
+            if not hasattr(self, '_active_sharers'):
+                self._active_sharers = {}
+            self._active_sharers[sid] = sharer
+
         # Send sharer_id back so the audio WS can reference it
         await ws.send_str(json.dumps({
             "type": "connected",
@@ -565,6 +581,8 @@ class WebViewerApp:
         except Exception as exc:
             log.debug("Sharer screen WS: %s", exc)
         finally:
+            if sid is not None and hasattr(self, '_active_sharers'):
+                self._active_sharers.pop(sid, None)
             await loop.run_in_executor(None, sharer.close)
             log.info("Browser sharer screen WS disconnected: %s", name)
         return ws
@@ -576,13 +594,22 @@ class WebViewerApp:
         await ws.prepare(request)
 
         name = request.query.get("name", f"Browser ({request.remote})")
-        log.info("Browser sharer audio WS connected: %s (%s)", name, request.remote)
+        sharer_id_str = request.query.get("sharer_id", "")
+        log.info("Browser sharer audio WS connected: %s (%s) sharer_id=%s",
+                 name, request.remote, sharer_id_str)
 
+        # Create a new SharerBridge for audio only, but set the correct sharer_id
         sharer = SharerBridge(
             self.bridge.host, name,
             screen_port=self.bridge.screen_port,
             audio_port=self.bridge.audio_port,
         )
+
+        # Set sharer_id from query param so relay can link audio to screen
+        try:
+            sharer.sharer_id = int(sharer_id_str)
+        except (ValueError, TypeError):
+            log.warning("Invalid sharer_id for audio WS: %s", sharer_id_str)
 
         loop = asyncio.get_event_loop()
         ok = await loop.run_in_executor(None, sharer.connect_audio)
