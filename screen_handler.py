@@ -35,10 +35,6 @@ class ScreenCapture:
         self.clients_lock = threading.Lock()
         self.compressor = zstd.ZstdCompressor(level=1)
         self._server_sock = None
-        # Bitrate tracking
-        self._bytes_this_sec = 0
-        self._sec_start = time.perf_counter()
-        self._adaptive_quality = quality
 
     def start(self):
         self.running = True
@@ -127,28 +123,13 @@ class ScreenCapture:
                         new_h = int(h * scale)
                         frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-                    # Encode to JPEG with adaptive quality for bitrate budget
+                    # Encode to JPEG at full quality (LAN has plenty of bandwidth)
                     _, buffer = cv2.imencode('.jpg', frame,
-                                             [cv2.IMWRITE_JPEG_QUALITY, self._adaptive_quality])
+                                             [cv2.IMWRITE_JPEG_QUALITY, self.quality])
                     frame_data = buffer.tobytes()
 
                     # Compress with zstd
                     compressed = self.compressor.compress(frame_data)
-
-                    # Bitrate budget tracking
-                    now = time.perf_counter()
-                    if now - self._sec_start >= 1.0:
-                        self._sec_start = now
-                        self._bytes_this_sec = 0
-                    self._bytes_this_sec += len(compressed)
-                    budget_bytes = self.bitrate * 1000 // 8  # kbps -> bytes/sec
-                    usage = self._bytes_this_sec / budget_bytes if budget_bytes > 0 else 0
-                    if usage > 1.0:
-                        # Over budget: lower quality (min 50 for LAN clarity)
-                        self._adaptive_quality = max(50, self._adaptive_quality - 3)
-                    elif usage < 0.8:
-                        # Under budget: raise quality back toward target
-                        self._adaptive_quality = min(self.quality, self._adaptive_quality + 1)
 
                     # Send to all clients
                     self._broadcast(compressed)

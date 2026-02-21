@@ -1471,21 +1471,6 @@
                     lastFrameSize = buf.byteLength;
                     avgFrameSize = avgFrameSize ? avgFrameSize * 0.8 + buf.byteLength * 0.2 : buf.byteLength;
 
-                    // Bitrate budget enforcement
-                    const now = performance.now();
-                    if (now - _brSecStart >= 1000) {
-                        _brSecStart = now;
-                        _brBytesSent = 0;
-                    }
-                    _brBytesSent += buf.byteLength;
-                    const budgetBytes = VIDEO_BITRATE_KBPS * 1000 / 8;
-                    const usage = _brBytesSent / budgetBytes;
-                    if (usage > 1.0) {
-                        _brAdaptiveQ = Math.max(0.30, _brAdaptiveQ - 0.03);
-                    } else if (usage < 0.8) {
-                        _brAdaptiveQ = Math.min(shareSettings.jpegQ, _brAdaptiveQ + 0.01);
-                    }
-
                     if (shareScreenWs.bufferedAmount > buf.byteLength * 2) {
                         sending = false;
                         return;
@@ -1547,7 +1532,7 @@
             if (!shareScreenWs || shareScreenWs.readyState !== WebSocket.OPEN) return;
 
             const MAX_DIM = shareSettings.maxDim;
-            const JPEG_Q  = _brAdaptiveQ;
+            const JPEG_Q  = shareSettings.jpegQ;  // Always use user's chosen quality (no throttling on LAN)
 
             let w = video.videoWidth;
             let h = video.videoHeight;
