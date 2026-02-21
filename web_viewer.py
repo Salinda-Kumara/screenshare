@@ -431,6 +431,7 @@ class WebViewerApp:
         self.app.router.add_get(WEBRTC_SIGNALING_PATH, self._handle_ws_rtc_signaling)
         self.app.router.add_get("/api/status", self._handle_status)
         self.app.router.add_get("/api/rtc-config", self._handle_rtc_config)
+        self.app.router.add_get("/api/debug", self._handle_debug)
 
         static_dir = os.path.join(BASE_DIR, "static")
         if os.path.isdir(static_dir):
@@ -445,7 +446,11 @@ class WebViewerApp:
         path = os.path.join(BASE_DIR, "static", "index.html")
         if not os.path.isfile(path):
             return web.Response(text="static/index.html not found", status=404)
-        return web.FileResponse(path)
+        # Disable caching so code updates reach the browser
+        return web.FileResponse(path, headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+        })
 
     async def _handle_status(self, request):
         return web.json_response({
@@ -468,6 +473,26 @@ class WebViewerApp:
             "minBitrate": WEBRTC_MIN_BITRATE,
             "preferredCodecs": WEBRTC_PREFERRED_CODECS,
             "audioBitrate": WEBRTC_AUDIO_BITRATE,
+        })
+
+    async def _handle_debug(self, request):
+        """Debug endpoint — shows full server state for troubleshooting."""
+        return web.json_response({
+            "relay_host": self.bridge.host,
+            "screen_port": self.bridge.screen_port,
+            "audio_port": self.bridge.audio_port,
+            "control_port": self.bridge.control_port,
+            "bridge": {
+                "screen_connected": self.bridge.screen_connected,
+                "audio_connected": self.bridge.audio_connected,
+                "control_connected": self.bridge.control_connected,
+                "frame_seq": self.bridge.frame_seq,
+                "audio_seq": self.bridge.audio_seq,
+                "sharers": self.bridge.sharers,
+                "active_sharer_id": self.bridge.active_sharer_id,
+            },
+            "rtc_rooms": list(self._rtc_rooms.keys()) if self._rtc_rooms else [],
+            "webrtc_enabled": WEBRTC_ENABLED,
         })
 
     # ── Screen WebSocket ──
@@ -615,10 +640,15 @@ class WebViewerApp:
 
         # Connect to relay in a thread to avoid blocking the event loop
         loop = asyncio.get_event_loop()
+        log.info("SharerBridge connecting to relay %s:%d ...",
+                 self.bridge.host, self.bridge.screen_port)
         ok = await loop.run_in_executor(None, sharer.connect_screen)
         if not ok:
+            log.error("SharerBridge FAILED to connect to relay %s:%d",
+                      self.bridge.host, self.bridge.screen_port)
             await ws.close(code=1011, message=b"Cannot connect to relay server")
             return ws
+        log.info("SharerBridge connected OK, sharer_id=%s", sharer.sharer_id)
 
         # Store sharer bridge so audio WS can find it
         sid = sharer.sharer_id

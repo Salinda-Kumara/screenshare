@@ -1072,51 +1072,77 @@
         setShareStatus("Connecting to server…", false);
 
         // ── Always register with relay via WebSocket (so sharer appears in list) ──
-        // Connect screen WebSocket
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
         const encodedName = encodeURIComponent(name);
         shareScreenWs = new WebSocket(
             `${proto}//${location.host}/ws/share/screen?name=${encodedName}`);
         shareScreenWs.binaryType = "arraybuffer";
 
-        shareScreenWs.onclose = () => {
+        shareScreenWs.onclose = (ev) => {
+            console.log("Share screen WS closed, code=" + ev.code + " reason=" + ev.reason);
             if (sharing) stopSharing();
         };
-        shareScreenWs.onerror = () => {
-            setShareStatus("Screen WebSocket error", true);
+        shareScreenWs.onerror = (ev) => {
+            console.error("Share screen WS error", ev);
         };
 
         // Wait for WebSocket to open
-        await new Promise((resolve, reject) => {
-            shareScreenWs.onopen = resolve;
-            shareScreenWs.onerror = reject;
-        }).catch(() => {
-            setShareStatus("Failed to connect screen WS", true);
-            stopSharing();
-            return;
-        });
+        setShareStatus("Opening WebSocket…", false);
+        try {
+            await new Promise((resolve, reject) => {
+                shareScreenWs.onopen = () => {
+                    console.log("Share screen WS opened");
+                    resolve();
+                };
+                shareScreenWs.onerror = (ev) => {
+                    reject(new Error("WebSocket connection failed"));
+                };
+            });
+        } catch (e) {
+            setShareStatus("Failed to connect WebSocket: " + e.message, true);
+            if (shareStream) { shareStream.getTracks().forEach(t => t.stop()); shareStream = null; }
+            return;  // Properly exits startSharing
+        }
 
-        // Wait for sharer_id from server (sent as first message after screen WS connects)
+        // Wait for sharer_id from server (server connects to relay, registers us)
+        setShareStatus("Registering with relay server…", false);
         let sharerId = null;
         try {
             sharerId = await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error("timeout")), 5000);
+                const timeout = setTimeout(() => reject(new Error(
+                    "Timeout waiting for relay registration (is relay_server running?)")), 10000);
                 shareScreenWs.onmessage = (ev) => {
                     clearTimeout(timeout);
+                    console.log("Share screen WS message:", ev.data);
                     try {
                         const msg = JSON.parse(ev.data);
                         if (msg.type === "connected") {
                             resolve(msg.sharer_id);
                         } else {
-                            resolve(null);
+                            reject(new Error("Unexpected message: " + ev.data));
                         }
-                    } catch (_) { resolve(null); }
+                    } catch (e) { reject(e); }
+                };
+                // Also handle close during wait
+                shareScreenWs.onclose = (ev) => {
+                    clearTimeout(timeout);
+                    reject(new Error("WebSocket closed (code=" + ev.code + "). Relay server may not be running."));
                 };
             });
-        } catch (_) {
-            console.warn("Did not receive sharer_id from server");
+        } catch (e) {
+            console.error("Share registration failed:", e);
+            setShareStatus(e.message, true);
+            if (shareStream) { shareStream.getTracks().forEach(t => t.stop()); shareStream = null; }
+            if (shareScreenWs && shareScreenWs.readyState <= 1) shareScreenWs.close();
+            shareScreenWs = null;
+            return;  // Properly exits startSharing
         }
-        // Clear the onmessage handler so it doesn't interfere
+
+        console.log("Registered with relay, sharer_id=" + sharerId);
+        setShareStatus("Registered (id=" + sharerId + "), starting capture…", false);
+
+        // Re-attach close handler for ongoing sharing
+        shareScreenWs.onclose = () => { if (sharing) stopSharing(); };
         shareScreenWs.onmessage = null;
 
         // Connect audio WebSocket if we have audio tracks
