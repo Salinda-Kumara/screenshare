@@ -357,9 +357,85 @@
         }
         .settings-panel .preset-btn:hover { background: #30304e; }
         .settings-panel .preset-btn.active { background: #44446a; border-color: #6666aa; color: #fff; }
+
+        /* ── Role selection screen ── */
+        .role-screen {
+            position: fixed;
+            inset: 0;
+            z-index: 100;
+            background: #0c0c18;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+        }
+        .role-screen.hidden { display: none; }
+        .role-screen h1 {
+            font-size: 28px;
+            color: #8888ff;
+            margin-bottom: 4px;
+        }
+        .role-screen p {
+            color: #808098;
+            font-size: 15px;
+            margin-bottom: 24px;
+        }
+        .role-cards {
+            display: flex;
+            gap: 28px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .role-card {
+            background: #16162a;
+            border: 2px solid #36365a;
+            border-radius: 16px;
+            padding: 36px 44px;
+            text-align: center;
+            cursor: pointer;
+            transition: all .2s;
+            min-width: 220px;
+        }
+        .role-card:hover {
+            border-color: #8888ff;
+            background: #1e1e38;
+            transform: translateY(-4px);
+            box-shadow: 0 8px 24px rgba(80,80,200,.2);
+        }
+        .role-card .role-icon { font-size: 48px; margin-bottom: 12px; }
+        .role-card .role-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: #d0d0e0;
+            margin-bottom: 6px;
+        }
+        .role-card .role-desc {
+            font-size: 13px;
+            color: #808098;
+            line-height: 1.4;
+        }
     </style>
 </head>
 <body>
+
+<!-- ═══ Role Selection Screen ═══ -->
+<div class="role-screen" id="role-screen">
+    <h1>&#x1F5B5; LAN Screen Share</h1>
+    <p>Choose how you want to join this session</p>
+    <div class="role-cards">
+        <div class="role-card" id="role-viewer-btn">
+            <div class="role-icon">&#x1F4FA;</div>
+            <div class="role-title">Viewer</div>
+            <div class="role-desc">Watch someone else's<br>shared screen</div>
+        </div>
+        <div class="role-card" id="role-sharer-btn">
+            <div class="role-icon">&#x1F4E4;</div>
+            <div class="role-title">Sharer</div>
+            <div class="role-desc">Share your screen<br>to this meeting</div>
+        </div>
+    </div>
+</div>
 
 <!-- ═══ Toolbar ═══ -->
 <div class="toolbar" id="toolbar">
@@ -370,7 +446,7 @@
 
     <span class="spacer"></span>
 
-    <label class="status-label" for="sharer-sel">Sharer:</label>
+    <label class="status-label" for="sharer-sel" id="sharer-label">Sharer:</label>
     <select id="sharer-sel"><option value="">Waiting…</option></select>
 
     <span class="sep"></span>
@@ -807,8 +883,8 @@
             });
         }
 
-        // Auto-attempt WebRTC viewer connection when a sharer is active
-        if (rtcUseWebRTC && sharers.length > 0) {
+        // Auto-attempt WebRTC viewer connection when a sharer is active (viewer role only)
+        if (chosenRole === "viewer" && rtcUseWebRTC && sharers.length > 0) {
             const activeName = sharers.find(s => s.id === activeId);
             if (activeName && activeName.name && !sharing) {
                 // Try joining the WebRTC room for this sharer
@@ -2064,10 +2140,46 @@
         })
         .catch(() => {});
 
-    /* ── Boot ── */
-    connectScreen();
-    connectAudio();
-    connectControl();
+    /* ── Role selection ── */
+    const roleScreen   = document.getElementById("role-screen");
+    const toolbar      = document.getElementById("toolbar");
+    const canvasWrapEl = document.getElementById("canvas-wrap");
+    const statusbar    = document.getElementById("statusbar");
+    let chosenRole     = null;
+
+    // Initially hide the app UI
+    toolbar.style.display      = "none";
+    canvasWrapEl.style.display = "none";
+    statusbar.style.display    = "none";
+
+    function enterRole(role) {
+        chosenRole = role;
+        roleScreen.classList.add("hidden");
+        toolbar.style.display      = "";
+        canvasWrapEl.style.display = "";
+        statusbar.style.display    = "";
+
+        if (role === "viewer") {
+            // Viewer: connect to streams, hide share button
+            shareBtn.style.display = "none";
+            connectScreen();
+            connectAudio();
+            connectControl();
+        } else if (role === "sharer") {
+            // Sharer: connect control (to register), then open share panel
+            connectControl();
+            // Hide viewer-only controls
+            document.getElementById("sharer-label").style.display = "none";
+            sharerSel.style.display = "none";
+            // Auto-open the share panel after a brief moment
+            setTimeout(() => {
+                sharePanel.classList.remove("hidden");
+            }, 300);
+        }
+    }
+
+    document.getElementById("role-viewer-btn").addEventListener("click", () => enterRole("viewer"));
+    document.getElementById("role-sharer-btn").addEventListener("click", () => enterRole("sharer"));
 })();
 </script>
 </body>
