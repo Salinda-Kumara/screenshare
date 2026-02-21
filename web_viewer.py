@@ -72,6 +72,11 @@ class RelayBridge:
         self.frame_seq = 0
         self._frame_event = threading.Event()  # signalled on new frame
 
+        # Async viewer notification (set from thread, awaited from asyncio)
+        self._viewer_events: set = set()
+        self._viewer_events_lock = threading.Lock()
+        self._event_loop = None
+
         # Audio (ring buffer of (seq, pcm_bytes))
         self._audio_lock = threading.Lock()
         self._audio_buffer: collections.deque = collections.deque(maxlen=500)
@@ -129,6 +134,27 @@ class RelayBridge:
                     result.append((seq, data))
         return result
 
+    def bind_loop(self, loop):
+        """Store the asyncio event loop for thread→async signalling."""
+        self._event_loop = loop
+
+    def register_viewer_event(self, evt):
+        with self._viewer_events_lock:
+            self._viewer_events.add(evt)
+
+    def unregister_viewer_event(self, evt):
+        with self._viewer_events_lock:
+            self._viewer_events.discard(evt)
+
+    def _signal_viewers(self):
+        """Signal all waiting viewer WebSocket handlers (called from thread)."""
+        loop = self._event_loop
+        if not loop:
+            return
+        with self._viewer_events_lock:
+            for evt in list(self._viewer_events):
+                loop.call_soon_threadsafe(evt.set)
+
     # ── threads ──
 
     def _screen_loop(self):
@@ -152,6 +178,7 @@ class RelayBridge:
                         self.latest_frame = jpeg
                         self.frame_seq += 1
                     self._frame_event.set()  # wake up waiting WS handlers
+                    self._signal_viewers()  # notify async viewer handlers
 
             except Exception as exc:
                 if self.running:
@@ -384,6 +411,7 @@ class WebViewerApp:
         self.web_port = web_port
         self.app = web.Application()
         self._setup_routes()
+        self.app.on_startup.append(self._on_startup)
 
     def _setup_routes(self):
         self.app.router.add_get("/", self._handle_index)
@@ -397,6 +425,9 @@ class WebViewerApp:
         static_dir = os.path.join(BASE_DIR, "static")
         if os.path.isdir(static_dir):
             self.app.router.add_static("/static/", static_dir)
+
+    async def _on_startup(self, app):
+        self.bridge.bind_loop(asyncio.get_running_loop())
 
     # ── HTTP handlers ──
 
@@ -424,6 +455,8 @@ class WebViewerApp:
         log.info("Browser screen WS connected (%s)", request.remote)
 
         last_seq = 0
+        my_event = asyncio.Event()
+        self.bridge.register_viewer_event(my_event)
         try:
             while not ws.closed and self.bridge.running:
                 frame = None
@@ -434,25 +467,24 @@ class WebViewerApp:
 
                 if frame:
                     await ws.send_bytes(frame)
-                    await asyncio.sleep(0.002)
+                    # No sleep — send next frame as soon as available
                 else:
-                    # Use event-driven wait with short timeout for low latency
-                    if hasattr(self.bridge, '_frame_event'):
-                        try:
-                            await asyncio.wait_for(
-                                asyncio.get_event_loop().run_in_executor(
-                                    None, self.bridge._frame_event.wait, 0.05),
-                                timeout=0.05)
-                            self.bridge._frame_event.clear()
-                        except asyncio.TimeoutError:
-                            pass
-                    else:
-                        await asyncio.sleep(0.008)
+                    # Pure-async wait: no thread-pool overhead
+                    my_event.clear()
+                    # Double-check after clear to avoid race
+                    with self.bridge._frame_lock:
+                        if self.bridge.frame_seq > last_seq:
+                            continue
+                    try:
+                        await asyncio.wait_for(my_event.wait(), timeout=0.05)
+                    except asyncio.TimeoutError:
+                        pass
         except (ConnectionResetError, asyncio.CancelledError):
             pass
         except Exception as exc:
             log.debug("Screen WS: %s", exc)
         finally:
+            self.bridge.unregister_viewer_event(my_event)
             log.info("Browser screen WS disconnected")
         return ws
 
@@ -473,7 +505,7 @@ class WebViewerApp:
                     await ws.send_bytes(pcm)
                     last_seq = seq
                 if not chunks:
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0.005)
         except (ConnectionResetError, asyncio.CancelledError):
             pass
         except Exception as exc:

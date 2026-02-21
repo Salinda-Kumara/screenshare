@@ -340,14 +340,13 @@
     function connectScreen() {
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
         const ws = new WebSocket(`${proto}//${location.host}/ws/screen`);
-        ws.binaryType = "arraybuffer";
+        ws.binaryType = "blob";
 
         ws.onmessage = async (ev) => {
             if (rendering) return;           // skip if prev frame still decoding
             rendering = true;
             try {
-                const blob = new Blob([ev.data], { type: "image/jpeg" });
-                const bmp  = await createImageBitmap(blob);
+                const bmp  = await createImageBitmap(ev.data);
 
                 // resize canvas to container
                 const cw = canvasWrap.clientWidth;
@@ -876,7 +875,7 @@
         const offCtx = offCanvas.getContext("2d", { alpha: false });
 
         const MAX_DIM = 1920;  // Full HD cap
-        const INTERVAL = 33;   // ~30 FPS
+        const INTERVAL = 16;   // low-latency (~60 cap, sending flag throttles actual rate)
         const JPEG_Q = 0.7;    // Higher quality
         let sending = false;
         let lastW = 0, lastH = 0;  // Track size to avoid resetting canvas each frame
@@ -948,6 +947,15 @@
 
         timerWorker.onmessage = captureFrame;
         timerWorker.postMessage("start");
+
+        // Also use requestVideoFrameCallback for frame-perfect timing when visible
+        if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+            function onVideoFrame() {
+                captureFrame();
+                if (sharing) video.requestVideoFrameCallback(onVideoFrame);
+            }
+            video.requestVideoFrameCallback(onVideoFrame);
+        }
 
         // Store cleanup handle
         shareCaptureId = {
