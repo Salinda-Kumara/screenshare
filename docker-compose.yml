@@ -1,11 +1,12 @@
-# LAN Screen Share — Docker Compose (Relay Server)
+# LAN Screen Share — Docker Compose (Relay Server + Web Viewer)
 #
 # Quick start:
-#   docker compose up              # start relay server
+#   docker compose up              # start relay server + web viewer
 #   docker compose up -d           # start in background
 #   docker compose down            # stop
 #
 # The relay server accepts sharers and viewers.
+# The web viewer serves a browser UI at http://<host>:8080
 # Clients auto-discover it on the LAN or connect by IP.
 #
 # Ports:
@@ -13,6 +14,7 @@
 #   9877/tcp  - Screen relay
 #   9878/tcp  - Audio relay
 #   9879/tcp  - Control / signaling
+#   1000/tcp  - Web viewer (browser)
 
 services:
   relay:

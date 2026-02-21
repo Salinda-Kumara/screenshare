@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LAN Screen Share</title>
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: #0c0c18;
+            color: #d0d0e0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            user-select: none;
+        }
+
+        /* ── Toolbar ── */
+        .toolbar {
+            display: flex;
+            align-items: center;
+            padding: 6px 14px;
+            background: #16162a;
+            border-bottom: 1px solid #26264a;
+            gap: 10px;
+            flex-shrink: 0;
+            z-index: 20;
+            flex-wrap: wrap;
+        }
+        .toolbar .brand {
+            font-size: 14px;
+            font-weight: 700;
+            color: #8888ff;
+            white-space: nowrap;
+            letter-spacing: .3px;
+        }
+        .toolbar .sep {
+            width: 1px;
+            height: 22px;
+            background: #2e2e50;
+        }
+        .toolbar .spacer { flex: 1; }
+
+        /* Status dot */
+        .dot {
+            width: 9px; height: 9px;
+            border-radius: 50%;
+            display: inline-block;
+            flex-shrink: 0;
+        }
+        .dot.ok   { background: #4caf50; box-shadow: 0 0 4px #4caf5088; }
+        .dot.warn { background: #ff9800; animation: pulse 1.2s infinite; }
+        .dot.err  { background: #f44336; }
+        @keyframes pulse { 50% { opacity: .3; } }
+
+        .status-label {
+            font-size: 12px;
+            color: #808098;
+            white-space: nowrap;
+        }
+
+        /* Controls */
+        select, .btn {
+            background: #22223c;
+            color: #d0d0e0;
+            border: 1px solid #36365a;
+            border-radius: 5px;
+            padding: 4px 10px;
+            font-size: 13px;
+            cursor: pointer;
+            outline: none;
+            transition: background .15s;
+        }
+        select:hover, .btn:hover { background: #30304e; }
+        .btn.active { background: #44446a; border-color: #6666aa; }
+
+        .vol-group {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 80px;
+            height: 4px;
+            background: #36365a;
+            border-radius: 2px;
+            outline: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 14px; height: 14px;
+            border-radius: 50%;
+            background: #8888ff;
+            cursor: pointer;
+        }
+
+        /* ── Canvas area ── */
+        .canvas-wrap {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+            position: relative;
+            overflow: hidden;
+        }
+        #screen-canvas {
+            display: block;
+        }
+
+        /* Overlay (waiting / disconnected) */
+        .overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0,0,0,.75);
+            z-index: 10;
+            transition: opacity .3s;
+        }
+        .overlay.hidden { opacity: 0; pointer-events: none; }
+        .spinner {
+            width: 44px; height: 44px;
+            border: 3px solid #222;
+            border-top-color: #8888ff;
+            border-radius: 50%;
+            animation: spin .9s linear infinite;
+            margin-bottom: 16px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .overlay-text { font-size: 16px; color: #888; }
+
+        /* ── Status bar ── */
+        .statusbar {
+            display: flex;
+            align-items: center;
+            padding: 3px 14px;
+            background: #16162a;
+            border-top: 1px solid #26264a;
+            font-size: 11px;
+            color: #606078;
+            gap: 18px;
+            flex-shrink: 0;
+            z-index: 20;
+        }
+        .statusbar .fill { flex: 1; }
+
+        /* Fullscreen tweaks */
+        body.fs .toolbar,
+        body.fs .statusbar { display: none; }
+    </style>
+</head>
+<body>
+
+<!-- ═══ Toolbar ═══ -->
+<div class="toolbar" id="toolbar">
+    <span class="brand">&#x1F5B5; LAN Screen Share</span>
+    <span class="sep"></span>
+    <span class="dot warn" id="dot"></span>
+    <span class="status-label" id="status-label">Connecting…</span>
+
+    <span class="spacer"></span>
+
+    <label class="status-label" for="sharer-sel">Sharer:</label>
+    <select id="sharer-sel"><option value="">Waiting…</option></select>
+
+    <span class="sep"></span>
+
+    <div class="vol-group">
+        <button class="btn" id="mute-btn" title="Toggle mute (M)">&#x1F50A;</button>
+        <input type="range" id="vol-slider" min="0" max="100" value="80" title="Volume">
+    </div>
+    <button class="btn" id="audio-btn" title="Browser requires a click to enable audio">&#x1F508; Enable Audio</button>
+
+    <span class="sep"></span>
+    <button class="btn" id="fs-btn" title="Fullscreen (F11)">&#x26F6;</button>
+</div>
+
+<!-- ═══ Screen area ═══ -->
+<div class="canvas-wrap" id="canvas-wrap">
+    <canvas id="screen-canvas"></canvas>
+    <div class="overlay" id="overlay">
+        <div class="spinner"></div>
+        <div class="overlay-text" id="overlay-text">Waiting for screen stream…</div>
+    </div>
+</div>
+
+<!-- ═══ Status bar ═══ -->
+<div class="statusbar" id="statusbar">
+    <span id="sb-fps">— fps</span>
+    <span id="sb-res">—</span>
+    <span id="sb-audio">Audio: off</span>
+    <span class="fill"></span>
+    <span id="sb-server">—</span>
+</div>
+
+<script>
+(() => {
+    "use strict";
+
+    /* ── DOM refs ── */
+    const canvas      = document.getElementById("screen-canvas");
+    const ctx         = canvas.getContext("2d");
+    const overlay     = document.getElementById("overlay");
+    const overlayText = document.getElementById("overlay-text");
+    const dot         = document.getElementById("dot");
+    const statusLabel = document.getElementById("status-label");
+    const sharerSel   = document.getElementById("sharer-sel");
+    const muteBtn     = document.getElementById("mute-btn");
+    const volSlider   = document.getElementById("vol-slider");
+    const audioBtn    = document.getElementById("audio-btn");
+    const fsBtn       = document.getElementById("fs-btn");
+    const canvasWrap  = document.getElementById("canvas-wrap");
+    const sbFps       = document.getElementById("sb-fps");
+    const sbRes       = document.getElementById("sb-res");
+    const sbAudio     = document.getElementById("sb-audio");
+    const sbServer    = document.getElementById("sb-server");
+
+    /* ── Config ── */
+    const AUDIO_RATE     = 44100;
+    const AUDIO_CHANNELS = 1;
+    const RECONNECT_MS   = 2000;
+
+    /* ── State ── */
+    let muted        = false;
+    let audioStarted = false;
+    let audioCtx     = null;
+    let gainNode     = null;
+    let processor    = null;
+    const audioQueue = [];   // Float32Array chunks
+    let audioOffset  = 0;
+
+    let frameCount   = 0;
+    let lastFpsTs    = performance.now();
+    let rendering    = false;
+
+    /* ────────────────────────────────
+       SCREEN WebSocket
+    ──────────────────────────────── */
+    function connectScreen() {
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        const ws = new WebSocket(`${proto}//${location.host}/ws/screen`);
+        ws.binaryType = "arraybuffer";
+
+        ws.onmessage = async (ev) => {
+            if (rendering) return;           // skip if prev frame still decoding
+            rendering = true;
+            try {
+                const blob = new Blob([ev.data], { type: "image/jpeg" });
+                const bmp  = await createImageBitmap(blob);
+
+                // resize canvas to container
+                const cw = canvasWrap.clientWidth;
+                const ch = canvasWrap.clientHeight;
+                if (canvas.width !== cw || canvas.height !== ch) {
+                    canvas.width  = cw;
+                    canvas.height = ch;
+                }
+
+                // aspect-ratio fit
+                const scale = Math.min(cw / bmp.width, ch / bmp.height);
+                const dw = bmp.width  * scale;
+                const dh = bmp.height * scale;
+                const dx = (cw - dw) / 2;
+                const dy = (ch - dh) / 2;
+
+                ctx.fillStyle = "#000";
+                ctx.fillRect(0, 0, cw, ch);
+                ctx.drawImage(bmp, dx, dy, dw, dh);
+                bmp.close && bmp.close();
+
+                sbRes.textContent = bmp.width + "\u00D7" + bmp.height;
+                overlay.classList.add("hidden");
+                frameCount++;
+            } catch (_) { /* ignore decode errors */ }
+            rendering = false;
+        };
+
+        ws.onclose = () => {
+            overlay.classList.remove("hidden");
+            overlayText.textContent = "Reconnecting screen…";
+            setTimeout(connectScreen, RECONNECT_MS);
+        };
+        ws.onerror = () => {};
+    }
+
+    /* ────────────────────────────────
+       AUDIO WebSocket
+    ──────────────────────────────── */
+    let audioWs = null;
+
+    function connectAudio() {
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        audioWs = new WebSocket(`${proto}//${location.host}/ws/audio`);
+        audioWs.binaryType = "arraybuffer";
+
+        audioWs.onmessage = (ev) => {
+            if (!audioStarted || muted) return;
+            // int16 PCM → float32
+            const i16 = new Int16Array(ev.data);
+            const f32 = new Float32Array(i16.length);
+            for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768.0;
+
+            // Send to AudioWorklet (preferred) or queue for ScriptProcessor
+            if (window._audioWorkletPort) {
+                window._audioWorkletPort.postMessage(f32);
+            } else {
+                audioQueue.push(f32);
+                // Keep ~0.5s buffer max at 44100 Hz (~5 chunks of 4096)
+                while (audioQueue.length > 10) { audioQueue.shift(); audioOffset = 0; }
+            }
+        };
+
+        audioWs.onclose = () => setTimeout(connectAudio, RECONNECT_MS);
+        audioWs.onerror = () => {};
+    }
+
+    /* ────────────────────────────────
+       CONTROL WebSocket
+    ──────────────────────────────── */
+    function connectControl() {
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        const ws = new WebSocket(`${proto}//${location.host}/ws/control`);
+
+        ws.onmessage = (ev) => {
+            try {
+                const msg = JSON.parse(ev.data);
+                if (msg.type === "state" || msg.type === "sharer_list") {
+                    refreshSharers(msg.sharers || [], msg.active_sharer_id);
+                    refreshStatus(msg);
+                }
+            } catch (_) {}
+        };
+
+        ws.onclose = () => {
+            setDot("err", "Disconnected");
+            setTimeout(connectControl, RECONNECT_MS);
+        };
+        ws.onerror = () => {};
+
+        // keep ref for sending commands
+        window._ctrlWs = ws;
+    }
+
+    function refreshSharers(sharers, activeId) {
+        const prev = sharerSel.value;
+        sharerSel.innerHTML = "";
+        if (sharers.length === 0) {
+            const o = document.createElement("option");
+            o.value = ""; o.textContent = "No sharers";
+            sharerSel.appendChild(o);
+        } else {
+            sharers.forEach(s => {
+                const o = document.createElement("option");
+                o.value = s.id;
+                o.textContent = s.name + " (" + s.ip + ")";
+                if (s.id === activeId) o.selected = true;
+                sharerSel.appendChild(o);
+            });
+        }
+    }
+
+    function refreshStatus(msg) {
+        const sc = msg.screen_connected;
+        const ac = msg.audio_connected;
+        const cc = msg.control_connected;
+        if (sc && cc) setDot("ok", "Connected");
+        else if (cc)  setDot("warn", "Waiting for stream…");
+        else          setDot("err", "Relay disconnected");
+
+        sbAudio.textContent = "Audio: " + (ac ? (audioStarted ? "playing" : "ready") : "off");
+    }
+
+    function setDot(cls, text) {
+        dot.className = "dot " + cls;
+        statusLabel.textContent = text;
+    }
+
+    /* ────────────────────────────────
+       AUDIO PLAYER (AudioWorklet with ScriptProcessor fallback)
+    ──────────────────────────────── */
+    function initAudio() {
+        if (audioStarted) return;
+
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: AUDIO_RATE });
+
+        // Resume context (required by browser autoplay policy)
+        if (audioCtx.state === "suspended") {
+            audioCtx.resume();
+        }
+
+        gainNode = audioCtx.createGain();
+        gainNode.gain.value = volSlider.value / 100;
+        gainNode.connect(audioCtx.destination);
+
+        // Use AudioWorklet if supported, otherwise fall back to ScriptProcessor
+        if (audioCtx.audioWorklet) {
+            _initWorklet();
+        } else {
+            _initScriptProcessor();
+        }
+
+        audioStarted = true;
+        audioBtn.style.display = "none";
+        sbAudio.textContent = "Audio: playing";
+    }
+
+    function _initScriptProcessor() {
+        // 0 input channels = pure generator (no input source needed)
+        processor = audioCtx.createScriptProcessor(4096, 0, 1);
+        processor.onaudioprocess = (e) => {
+            const out = e.outputBuffer.getChannelData(0);
+            _fillBuffer(out);
+        };
+        processor.connect(gainNode);
+    }
+
+    async function _initWorklet() {
+        // Inline the worklet code via Blob URL (no extra file needed)
+        const workletCode = `
+            class PCMPlayerProcessor extends AudioWorkletProcessor {
+                constructor() {
+                    super();
+                    this._queue = [];
+                    this._offset = 0;
+                    this.port.onmessage = (e) => {
+                        this._queue.push(e.data);
+                        // Cap buffer at ~0.5s
+                        while (this._queue.length > 10) { this._queue.shift(); this._offset = 0; }
+                    };
+                }
+                process(inputs, outputs) {
+                    const out = outputs[0][0];
+                    let w = 0;
+                    while (w < out.length && this._queue.length > 0) {
+                        const chunk = this._queue[0];
+                        const avail = chunk.length - this._offset;
+                        const n = Math.min(avail, out.length - w);
+                        for (let i = 0; i < n; i++) out[w + i] = chunk[this._offset + i];
+                        w += n;
+                        this._offset += n;
+                        if (this._offset >= chunk.length) { this._queue.shift(); this._offset = 0; }
+                    }
+                    for (let i = w; i < out.length; i++) out[i] = 0;
+                    return true;
+                }
+            }
+            registerProcessor("pcm-player-processor", PCMPlayerProcessor);
+        `;
+        const blob = new Blob([workletCode], { type: "application/javascript" });
+        const url = URL.createObjectURL(blob);
+
+        try {
+            await audioCtx.audioWorklet.addModule(url);
+            const workletNode = new AudioWorkletNode(audioCtx, "pcm-player-processor");
+            workletNode.connect(gainNode);
+
+            // Override: push audio chunks to the worklet via MessagePort
+            window._audioWorkletPort = workletNode.port;
+            URL.revokeObjectURL(url);
+        } catch (err) {
+            console.warn("AudioWorklet failed, using ScriptProcessor fallback:", err);
+            URL.revokeObjectURL(url);
+            _initScriptProcessor();
+        }
+    }
+
+    function _fillBuffer(out) {
+        let w = 0;
+        while (w < out.length && audioQueue.length > 0) {
+            const chunk = audioQueue[0];
+            const avail = chunk.length - audioOffset;
+            const n = Math.min(avail, out.length - w);
+            for (let i = 0; i < n; i++) out[w + i] = chunk[audioOffset + i];
+            w += n;
+            audioOffset += n;
+            if (audioOffset >= chunk.length) { audioQueue.shift(); audioOffset = 0; }
+        }
+        for (let i = w; i < out.length; i++) out[i] = 0;
+    }
+
+    /* ────────────────────────────────
+       EVENT HANDLERS
+    ──────────────────────────────── */
+    sharerSel.addEventListener("change", () => {
+        const id = parseInt(sharerSel.value, 10);
+        const ws = window._ctrlWs;
+        if (id && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "select_sharer", sharer_id: id }));
+        }
+    });
+
+    muteBtn.addEventListener("click", () => {
+        muted = !muted;
+        muteBtn.innerHTML = muted ? "&#x1F507;" : "&#x1F50A;";
+        if (gainNode) gainNode.gain.value = muted ? 0 : volSlider.value / 100;
+        if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+    });
+
+    volSlider.addEventListener("input", () => {
+        if (gainNode && !muted) gainNode.gain.value = volSlider.value / 100;
+        if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+    });
+
+    audioBtn.addEventListener("click", initAudio);
+
+    fsBtn.addEventListener("click", toggleFs);
+    canvasWrap.addEventListener("dblclick", toggleFs);
+
+    function toggleFs() {
+        if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+        else document.exitFullscreen();
+    }
+    document.addEventListener("fullscreenchange", () => {
+        document.body.classList.toggle("fs", !!document.fullscreenElement);
+    });
+
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "F11")   { e.preventDefault(); toggleFs(); }
+        if (e.key === "Escape" && document.fullscreenElement) document.exitFullscreen();
+        if (e.key === "m" || e.key === "M") muteBtn.click();
+    });
+
+    /* ── FPS counter ── */
+    setInterval(() => {
+        const now = performance.now();
+        const sec = (now - lastFpsTs) / 1000;
+        sbFps.textContent = Math.round(frameCount / sec) + " fps";
+        frameCount = 0;
+        lastFpsTs = now;
+    }, 1000);
+
+    /* ── Canvas resize ── */
+    const ro = new ResizeObserver(() => {
+        canvas.width  = canvasWrap.clientWidth;
+        canvas.height = canvasWrap.clientHeight;
+    });
+    ro.observe(canvasWrap);
+
+    /* ── Initial status fetch ── */
+    fetch("/api/status")
+        .then(r => r.json())
+        .then(d => { sbServer.textContent = "Server: " + d.relay_host; })
+        .catch(() => {});
+
+    /* ── Boot ── */
+    connectScreen();
+    connectAudio();
+    connectControl();
+})();
+</script>
+</body>
+</html>
