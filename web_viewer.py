@@ -498,13 +498,16 @@ class WebViewerApp:
         last_seq = 0
         my_event = asyncio.Event()
         self.bridge.register_viewer_event(my_event)
+        sent_init = False  # Track whether this viewer has received the init segment
+        init_version = None  # Track which init segment was sent
 
         # If currently in stream mode, send init segment first
         if self.bridge._is_stream and self.bridge.stream_init_segment:
             try:
                 await ws.send_bytes(self.bridge.stream_init_segment)
-                # Skip past any chunks already in queue to avoid duplication
                 last_seq = self.bridge.frame_seq
+                sent_init = True
+                init_version = id(self.bridge.stream_init_segment)
                 log.info("Sent stream init segment to viewer, starting from seq=%d", last_seq)
             except Exception:
                 pass
@@ -512,7 +515,19 @@ class WebViewerApp:
         try:
             while not ws.closed and self.bridge.running:
                 if self.bridge._is_stream:
-                    # Stream mode: sequential chunk delivery (all chunks in order)
+                    # Check if we need to send the init segment
+                    cur_init = self.bridge.stream_init_segment
+                    if cur_init and (not sent_init or init_version != id(cur_init)):
+                        try:
+                            await ws.send_bytes(cur_init)
+                            last_seq = self.bridge.frame_seq
+                            sent_init = True
+                            init_version = id(cur_init)
+                            log.info("Sent init segment to in-loop viewer (seq=%d)", last_seq)
+                        except Exception:
+                            break
+
+                    # Stream mode: sequential chunk delivery
                     chunks = self.bridge.get_chunks_since(last_seq)
                     for seq, data in chunks:
                         if ws.closed:
@@ -526,6 +541,8 @@ class WebViewerApp:
                         except asyncio.TimeoutError:
                             pass
                 else:
+                    sent_init = False  # Reset when switching back to JPEG
+                    init_version = None
                     # JPEG mode: latest frame only (skip old frames)
                     frame = None
                     with self.bridge._frame_lock:
