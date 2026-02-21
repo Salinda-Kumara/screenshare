@@ -186,8 +186,6 @@ class RelayBridge:
                         self.frame_seq += 1
                     self._frame_event.set()
                     self._signal_viewers()
-                    self._frame_event.set()
-                    self._signal_viewers()
 
             except Exception as exc:
                 if self.running:

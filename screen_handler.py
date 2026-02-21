@@ -13,7 +13,6 @@ import zstandard as zstd
 from config import (
     SCREEN_PORT, SCREEN_FPS, SCREEN_QUALITY,
     SCREEN_RESIZE_FACTOR, CONNECT_TIMEOUT, RECV_TIMEOUT,
-    VIDEO_BITRATE
 )
 from network_utils import configure_socket, send_frame, recv_frame
 
@@ -24,12 +23,11 @@ class ScreenCapture:
     """Captures the screen and streams to connected viewers."""
 
     def __init__(self, port=SCREEN_PORT, fps=SCREEN_FPS, quality=SCREEN_QUALITY,
-                 resize_factor=SCREEN_RESIZE_FACTOR, bitrate=VIDEO_BITRATE):
+                 resize_factor=SCREEN_RESIZE_FACTOR):
         self.port = port
         self.fps = fps
         self.quality = quality
         self.resize_factor = resize_factor
-        self.bitrate = bitrate  # kbps
         self.running = False
         self.clients = []
         self.clients_lock = threading.Lock()

@@ -544,11 +544,6 @@
     let lastFrameSize = 0;
     let avgFrameSize  = 0;
 
-    // Bitrate budget tracking (shared with capture loop)
-    let _brBytesSent = 0;
-    let _brSecStart = performance.now();
-    let _brAdaptiveQ = 1.0;
-
     function syncSettingsUI() {
         setResolution.value = String(shareSettings.maxDim);
         setQuality.value = Math.round(shareSettings.jpegQ * 100);
@@ -626,7 +621,7 @@
         if (sharing && lastFrameSize > 0) {
             const kb = (avgFrameSize / 1024).toFixed(1);
             const bw = (avgFrameSize * shareSettings.fps / 1024).toFixed(0);
-            const q = typeof _brAdaptiveQ === 'number' ? (_brAdaptiveQ * 100).toFixed(0) : '—';
+            const q = Math.round(shareSettings.jpegQ * 100);
             setStats.textContent = `${kb} KB · ~${bw} KB/s · Q ${q}%`;
         } else {
             setStats.textContent = '\u2014';
@@ -671,14 +666,20 @@
         const ws = new WebSocket(`${proto}//${location.host}/ws/screen`);
         ws.binaryType = "blob";
 
+        // Track last known canvas size to avoid unnecessary clears
+        let _lastCanvasW = 0, _lastCanvasH = 0;
+
         ws.onmessage = async (ev) => {
             if (rendering) return;
             rendering = true;
             try {
                 const bmp = await createImageBitmap(ev.data);
-                if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+                // Only resize canvas if dimensions actually changed
+                if (_lastCanvasW !== bmp.width || _lastCanvasH !== bmp.height) {
                     canvas.width = bmp.width;
                     canvas.height = bmp.height;
+                    _lastCanvasW = bmp.width;
+                    _lastCanvasH = bmp.height;
                 }
                 ctx.drawImage(bmp, 0, 0);
                 bmp.close && bmp.close();
@@ -1430,9 +1431,6 @@
         let sending = false;
         let lastW = 0, lastH = 0;
 
-        // Reset adaptive quality to current setting
-        _brAdaptiveQ = shareSettings.jpegQ;
-
         // ── Encoding Worker ──
         // JPEG encoding via OffscreenCanvas in a Worker — NOT throttled
         // when the browser tab is in the background.
@@ -1742,7 +1740,8 @@
                 if (!params.encodings || params.encodings.length === 0) {
                     params.encodings = [{}];
                 }
-                params.encodings[0].maxBitrate = rtcConfig.maxBitrate || 15_000_000;
+                // No bitrate cap on LAN — use maximum quality
+                params.encodings[0].maxBitrate = 100_000_000;  // 100 Mbps (effectively unlimited on LAN)
                 // Prefer high resolution & framerate
                 params.encodings[0].maxFramerate = shareSettings.fps || 30;
                 params.encodings[0].priority = "high";
@@ -1955,13 +1954,17 @@
         rtcViewerVideoEl.srcObject = stream;
 
         // Render loop: draw video frames to our shared canvas
+        let _rtcLastW = 0, _rtcLastH = 0;
         function drawFrame() {
             if (!rtcViewerActive) return;
             if (rtcViewerVideoEl.videoWidth > 0) {
-                if (canvas.width !== rtcViewerVideoEl.videoWidth ||
-                    canvas.height !== rtcViewerVideoEl.videoHeight) {
+                // Only resize canvas if dimensions actually changed
+                if (_rtcLastW !== rtcViewerVideoEl.videoWidth ||
+                    _rtcLastH !== rtcViewerVideoEl.videoHeight) {
                     canvas.width = rtcViewerVideoEl.videoWidth;
                     canvas.height = rtcViewerVideoEl.videoHeight;
+                    _rtcLastW = rtcViewerVideoEl.videoWidth;
+                    _rtcLastH = rtcViewerVideoEl.videoHeight;
                 }
                 ctx.drawImage(rtcViewerVideoEl, 0, 0);
 
