@@ -422,6 +422,11 @@
         <span class="setting-label">&#x1F4CA; Stats</span>
         <span class="setting-value" id="set-stats" style="min-width:auto;font-weight:400;color:#808098">—</span>
     </div>
+    <div class="setting-row">
+        <span class="setting-label">&#x1F310; Transport</span>
+        <span class="setting-value" id="set-transport" style="min-width:auto;font-weight:400;color:#4caf50">Checking…</span>
+    </div>
+    <div class="hint">WebRTC = lowest latency, HW-accelerated AV1/H264. WebSocket = JPEG fallback.</div>
     <div class="btn-row">
         <button class="btn-sm primary" id="settings-close-btn">Done</button>
         <button class="btn-sm" id="settings-reset-btn">Reset Defaults</button>
@@ -476,12 +481,12 @@
     const RECONNECT_MS   = 2000;
 
     /* ── Quality Settings (user-adjustable, persisted in localStorage) ── */
-    const VIDEO_BITRATE_KBPS = 5000;  // Target bitrate budget in kbps
+    const VIDEO_BITRATE_KBPS = 8000;  // Target bitrate budget in kbps (LAN generous)
     const PRESETS = {
-        performance: { maxDim: 1280, jpegQ: 0.60, fps: 20 },
-        balanced:    { maxDim: 1920, jpegQ: 0.85, fps: 30 },
-        quality:     { maxDim: 1920, jpegQ: 1.00, fps: 60 },
-        ultra:       { maxDim: 9999, jpegQ: 1.00, fps: 60 },
+        performance: { maxDim: 1280, jpegQ: 0.60, fps: 20, bitrate: 3000 },
+        balanced:    { maxDim: 1920, jpegQ: 0.85, fps: 30, bitrate: 6000 },
+        quality:     { maxDim: 1920, jpegQ: 1.00, fps: 60, bitrate: 8000 },
+        ultra:       { maxDim: 9999, jpegQ: 1.00, fps: 60, bitrate: 15000 },
     };
     const DEFAULT_SETTINGS = { ...PRESETS.quality, preset: 'quality' };
 
@@ -600,6 +605,23 @@
             setStats.textContent = `${kb} KB · ~${bw} KB/s · Q ${q}%`;
         } else {
             setStats.textContent = '\u2014';
+        }
+        // Update transport indicator
+        const transportEl = document.getElementById('set-transport');
+        if (transportEl) {
+            if (sharing && Object.keys(rtcPeerConns).length > 0) {
+                transportEl.textContent = `WebRTC (${Object.keys(rtcPeerConns).length} peer${Object.keys(rtcPeerConns).length > 1 ? 's' : ''})`;
+                transportEl.style.color = '#4caf50';
+            } else if (sharing) {
+                transportEl.textContent = 'WebSocket (JPEG)';
+                transportEl.style.color = '#ff9800';
+            } else if (rtcViewerActive) {
+                transportEl.textContent = 'WebRTC Viewer';
+                transportEl.style.color = '#4caf50';
+            } else {
+                transportEl.textContent = rtcUseWebRTC ? 'WebRTC ready' : 'WebSocket';
+                transportEl.style.color = rtcUseWebRTC ? '#4caf50' : '#808098';
+            }
         }
     }, 1000);
 
@@ -731,6 +753,16 @@
                 if (s.id === activeId) o.selected = true;
                 sharerSel.appendChild(o);
             });
+        }
+
+        // Auto-attempt WebRTC viewer connection when a sharer is active
+        if (rtcUseWebRTC && sharers.length > 0) {
+            const activeName = sharers.find(s => s.id === activeId);
+            if (activeName && activeName.name && !sharing) {
+                // Try joining the WebRTC room for this sharer
+                // (Only works if sharer is using WebRTC too)
+                _rtcJoinViewerRoom(activeName.name).catch(() => {});
+            }
         }
     }
 
@@ -935,6 +967,7 @@
 
     /* ────────────────────────────────
        SCREEN SHARING (browser → server)
+       Dual-path: WebRTC (preferred) with WebSocket/JPEG fallback
     ──────────────────────────────── */
     const sharePanel    = document.getElementById("share-panel");
     const shareBtn      = document.getElementById("share-btn");
@@ -947,14 +980,37 @@
 
     let sharing         = false;
     let shareStream     = null;  // MediaStream
-    let shareScreenWs   = null;  // WebSocket for screen frames
-    let shareAudioWs    = null;  // WebSocket for audio PCM
+    let shareScreenWs   = null;  // WebSocket for screen frames (fallback)
+    let shareAudioWs    = null;  // WebSocket for audio PCM (fallback)
     let shareCaptureId  = null;  // interval id
     let shareAudioCtx   = null;
     let shareAudioProc  = null;
-    let shareCursorX    = -1;   // mouse X (screen or client coords)
-    let shareCursorY    = -1;   // mouse Y
-    let shareSurface    = 'unknown'; // 'monitor' | 'window' | 'browser'
+    let shareCursorX    = -1;
+    let shareCursorY    = -1;
+    let shareSurface    = 'unknown';
+
+    // ── WebRTC state ──
+    let rtcConfig       = null;  // fetched from /api/rtc-config
+    let rtcSignalingWs  = null;  // signaling WebSocket
+    let rtcPeerConns    = {};    // peerId → RTCPeerConnection (sharer has one per viewer)
+    let rtcUseWebRTC    = false; // resolved at share-start time
+    let rtcViewerPC     = null;  // viewer side: single RTCPeerConnection
+    let rtcViewerSignal = null;  // viewer signaling WS
+    let rtcViewerStream = null;  // viewer received MediaStream
+
+    // Fetch WebRTC config on load
+    async function fetchRtcConfig() {
+        try {
+            const resp = await fetch("/api/rtc-config");
+            rtcConfig = await resp.json();
+            rtcUseWebRTC = rtcConfig && rtcConfig.enabled;
+            console.log("WebRTC config:", rtcConfig);
+        } catch (e) {
+            console.warn("WebRTC config unavailable, falling back to WebSocket:", e);
+            rtcUseWebRTC = false;
+        }
+    }
+    fetchRtcConfig();
 
     shareBtn.addEventListener("click", () => {
         sharePanel.classList.toggle("hidden");
@@ -1014,6 +1070,25 @@
         document.addEventListener('mouseleave', _onShareMouseLeave);
 
         setShareStatus("Connecting to server…", false);
+
+        // ── Try WebRTC path first (peer-to-peer, lowest latency, HW codecs) ──
+        if (rtcUseWebRTC && window.RTCPeerConnection) {
+            try {
+                await _startSharingWebRTC(name, shareStream, includeAudio);
+                sharing = true;
+                shareStartBtn.classList.add("hidden");
+                shareStopBtn.classList.remove("hidden");
+                shareCloseBtn.classList.add("hidden");
+                shareBtn.classList.add("active");
+                shareBtn.innerHTML = "&#x1F534; Sharing (WebRTC)";
+                setShareStatus("Sharing via WebRTC — " + name, false);
+                return;
+            } catch (e) {
+                console.warn("WebRTC sharing failed, falling back to WebSocket:", e);
+            }
+        }
+
+        // ── Fallback: WebSocket + JPEG path ──
 
         // Connect screen WebSocket
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -1095,6 +1170,16 @@
         document.removeEventListener('mousemove', _onShareMouseMove);
         document.removeEventListener('mouseleave', _onShareMouseLeave);
         shareCursorX = -1; shareCursorY = -1;
+
+        // Clean up WebRTC peer connections
+        for (const peerId in rtcPeerConns) {
+            try { rtcPeerConns[peerId].close(); } catch(_) {}
+        }
+        rtcPeerConns = {};
+        if (rtcSignalingWs && rtcSignalingWs.readyState <= 1) {
+            rtcSignalingWs.close();
+        }
+        rtcSignalingWs = null;
 
         if (shareCaptureId) {
             if (shareCaptureId.cancel) shareCaptureId.cancel();
@@ -1420,10 +1505,376 @@
         }
     }
 
+    /* ════════════════════════════════════════════════════════
+       WebRTC SHARING ENGINE
+       ─ Sharer creates one RTCPeerConnection per viewer.
+       ─ Media goes directly peer-to-peer over UDP on LAN.
+       ─ Codec preference: AV1 > H264 > VP9 (configurable).
+       ─ Audio uses Opus at 128 kbps stereo.
+    ════════════════════════════════════════════════════════ */
+
+    async function _startSharingWebRTC(name, stream, includeAudio) {
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        const encodedName = encodeURIComponent(name);
+        const url = `${proto}//${location.host}/ws/rtc?role=sharer&room=${encodedName}`;
+
+        return new Promise((resolve, reject) => {
+            rtcSignalingWs = new WebSocket(url);
+            const timeout = setTimeout(() => {
+                reject(new Error("WebRTC signaling timeout"));
+            }, 5000);
+
+            rtcSignalingWs.onopen = () => {
+                clearTimeout(timeout);
+                console.log("WebRTC signaling connected as sharer");
+                resolve();
+            };
+            rtcSignalingWs.onerror = (e) => {
+                clearTimeout(timeout);
+                reject(e);
+            };
+            rtcSignalingWs.onclose = () => {
+                if (sharing) {
+                    console.warn("WebRTC signaling closed while sharing");
+                }
+            };
+
+            rtcSignalingWs.onmessage = async (ev) => {
+                let data;
+                try { data = JSON.parse(ev.data); } catch (_) { return; }
+
+                if (data.type === "viewer_joined") {
+                    // New viewer wants to connect — create a peer connection for them
+                    await _rtcCreateOfferForViewer(data.peerId, stream);
+                }
+                else if (data.type === "answer") {
+                    // Viewer sent SDP answer
+                    const pc = rtcPeerConns[data.from];
+                    if (pc) {
+                        await pc.setRemoteDescription(new RTCSessionDescription({
+                            type: "answer", sdp: data.sdp
+                        }));
+                    }
+                }
+                else if (data.type === "candidate") {
+                    // ICE candidate from viewer
+                    const pc = rtcPeerConns[data.from];
+                    if (pc && data.candidate) {
+                        await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+                    }
+                }
+                else if (data.type === "viewer_left") {
+                    const pc = rtcPeerConns[data.peerId];
+                    if (pc) {
+                        pc.close();
+                        delete rtcPeerConns[data.peerId];
+                    }
+                }
+            };
+        });
+    }
+
+    async function _rtcCreateOfferForViewer(peerId, stream) {
+        const iceServers = rtcConfig.iceServers || [];
+        const pc = new RTCPeerConnection({
+            iceServers: iceServers,
+            bundlePolicy: "max-bundle",
+        });
+        rtcPeerConns[peerId] = pc;
+
+        // Add all tracks from the captured stream
+        for (const track of stream.getTracks()) {
+            const sender = pc.addTrack(track, stream);
+
+            // Set encoding parameters for quality
+            if (track.kind === "video") {
+                const params = sender.getParameters();
+                if (!params.encodings || params.encodings.length === 0) {
+                    params.encodings = [{}];
+                }
+                params.encodings[0].maxBitrate = rtcConfig.maxBitrate || 15_000_000;
+                // Prefer high resolution & framerate
+                params.encodings[0].maxFramerate = shareSettings.fps || 60;
+                params.encodings[0].priority = "high";
+                params.encodings[0].networkPriority = "high";
+                await sender.setParameters(params);
+            }
+            if (track.kind === "audio") {
+                const params = sender.getParameters();
+                if (!params.encodings || params.encodings.length === 0) {
+                    params.encodings = [{}];
+                }
+                params.encodings[0].maxBitrate = rtcConfig.audioBitrate || 128_000;
+                await sender.setParameters(params);
+            }
+        }
+
+        // Prefer AV1 > H264 > VP9 for sharper text on LAN
+        _rtcSetCodecPreference(pc);
+
+        // ICE candidates → send to viewer
+        pc.onicecandidate = (ev) => {
+            if (ev.candidate && rtcSignalingWs && rtcSignalingWs.readyState === WebSocket.OPEN) {
+                rtcSignalingWs.send(JSON.stringify({
+                    type: "candidate",
+                    to: peerId,
+                    candidate: ev.candidate.toJSON(),
+                }));
+            }
+        };
+
+        pc.oniceconnectionstatechange = () => {
+            console.log(`WebRTC ICE state [viewer ${peerId}]: ${pc.iceConnectionState}`);
+            if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "disconnected") {
+                pc.close();
+                delete rtcPeerConns[peerId];
+            }
+        };
+
+        // Create offer
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // Send offer to viewer via signaling
+        if (rtcSignalingWs && rtcSignalingWs.readyState === WebSocket.OPEN) {
+            rtcSignalingWs.send(JSON.stringify({
+                type: "offer",
+                to: peerId,
+                sdp: offer.sdp,
+            }));
+        }
+    }
+
+    function _rtcSetCodecPreference(pc) {
+        /* Reorder video codecs to prefer AV1 → H264 → VP9 for sharper screen content */
+        if (!pc.getTransceivers) return;
+        const preferred = rtcConfig.preferredCodecs || ["video/AV1", "video/H264", "video/VP9"];
+
+        for (const t of pc.getTransceivers()) {
+            if (t.sender && t.sender.track && t.sender.track.kind === "video") {
+                if (typeof RTCRtpSender.getCapabilities === "function") {
+                    const caps = RTCRtpSender.getCapabilities("video");
+                    if (caps && caps.codecs) {
+                        const sorted = [];
+                        // Add preferred codecs first
+                        for (const pref of preferred) {
+                            for (const c of caps.codecs) {
+                                if (c.mimeType === pref) sorted.push(c);
+                            }
+                        }
+                        // Then all others
+                        for (const c of caps.codecs) {
+                            if (!sorted.includes(c)) sorted.push(c);
+                        }
+                        try {
+                            t.setCodecPreferences(sorted);
+                            console.log("WebRTC codec preference set:", sorted.map(c => c.mimeType).slice(0, 4));
+                        } catch (e) {
+                            console.warn("Could not set codec preferences:", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* ════════════════════════════════════════════════════════
+       WebRTC VIEWER ENGINE
+       ─ Viewer connects to sharer's room via signaling.
+       ─ Receives media stream with HW-decoded video+audio.
+       ─ Falls back to WebSocket/JPEG if WebRTC unavailable.
+    ════════════════════════════════════════════════════════ */
+
+    let rtcViewerActive = false;
+    let rtcViewerVideoEl = null;
+
+    async function connectWebRTCViewer() {
+        if (!rtcUseWebRTC || !window.RTCPeerConnection) return false;
+
+        // We need to know which sharer's room to join.
+        // The active sharer name is used as the room ID.
+        // For now, attempt "default" room, and we'll update on sharer switch.
+        return false; // WebRTC viewer is activated on-demand when a sharer is using WebRTC
+    }
+
+    async function _rtcJoinViewerRoom(roomName) {
+        if (rtcViewerSignal) {
+            rtcViewerSignal.close();
+            rtcViewerSignal = null;
+        }
+        if (rtcViewerPC) {
+            rtcViewerPC.close();
+            rtcViewerPC = null;
+        }
+
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        const encodedRoom = encodeURIComponent(roomName);
+        const url = `${proto}//${location.host}/ws/rtc?role=viewer&room=${encodedRoom}`;
+
+        rtcViewerSignal = new WebSocket(url);
+
+        rtcViewerSignal.onmessage = async (ev) => {
+            let data;
+            try { data = JSON.parse(ev.data); } catch (_) { return; }
+
+            if (data.type === "offer") {
+                // Sharer sent us an offer — create answer
+                const iceServers = rtcConfig ? rtcConfig.iceServers || [] : [];
+                rtcViewerPC = new RTCPeerConnection({
+                    iceServers: iceServers,
+                    bundlePolicy: "max-bundle",
+                });
+
+                rtcViewerPC.onicecandidate = (ev) => {
+                    if (ev.candidate && rtcViewerSignal && rtcViewerSignal.readyState === WebSocket.OPEN) {
+                        rtcViewerSignal.send(JSON.stringify({
+                            type: "candidate",
+                            candidate: ev.candidate.toJSON(),
+                        }));
+                    }
+                };
+
+                rtcViewerPC.ontrack = (ev) => {
+                    console.log("WebRTC viewer received track:", ev.track.kind);
+                    rtcViewerStream = ev.streams[0] || new MediaStream([ev.track]);
+
+                    if (ev.track.kind === "video") {
+                        _rtcAttachViewerVideo(rtcViewerStream);
+                    }
+                    if (ev.track.kind === "audio") {
+                        _rtcAttachViewerAudio(rtcViewerStream);
+                    }
+                };
+
+                rtcViewerPC.oniceconnectionstatechange = () => {
+                    console.log("WebRTC viewer ICE:", rtcViewerPC.iceConnectionState);
+                    const state = rtcViewerPC.iceConnectionState;
+                    if (state === "connected" || state === "completed") {
+                        overlay.classList.add("hidden");
+                        rtcViewerActive = true;
+                        setDot("ok", "Connected (WebRTC)");
+
+                        // Show codec info in status bar
+                        _rtcUpdateViewerStats();
+                    } else if (state === "failed" || state === "closed") {
+                        rtcViewerActive = false;
+                    }
+                };
+
+                await rtcViewerPC.setRemoteDescription(new RTCSessionDescription({
+                    type: "offer", sdp: data.sdp
+                }));
+
+                const answer = await rtcViewerPC.createAnswer();
+                await rtcViewerPC.setLocalDescription(answer);
+
+                rtcViewerSignal.send(JSON.stringify({
+                    type: "answer",
+                    sdp: answer.sdp,
+                }));
+            }
+            else if (data.type === "candidate") {
+                if (rtcViewerPC && data.candidate) {
+                    await rtcViewerPC.addIceCandidate(new RTCIceCandidate(data.candidate));
+                }
+            }
+            else if (data.type === "sharer_left") {
+                if (rtcViewerPC) { rtcViewerPC.close(); rtcViewerPC = null; }
+                rtcViewerActive = false;
+                if (rtcViewerVideoEl) { rtcViewerVideoEl.srcObject = null; }
+                overlay.classList.remove("hidden");
+                overlayText.textContent = "Sharer disconnected…";
+            }
+        };
+
+        rtcViewerSignal.onclose = () => {
+            console.log("WebRTC viewer signaling closed");
+        };
+    }
+
+    function _rtcAttachViewerVideo(stream) {
+        // Create/reuse a hidden video element, draw to our existing canvas
+        if (!rtcViewerVideoEl) {
+            rtcViewerVideoEl = document.createElement("video");
+            rtcViewerVideoEl.autoplay = true;
+            rtcViewerVideoEl.playsInline = true;
+            rtcViewerVideoEl.muted = true; // video element muted; audio handled separately
+            rtcViewerVideoEl.style.display = "none";
+            document.body.appendChild(rtcViewerVideoEl);
+        }
+        rtcViewerVideoEl.srcObject = stream;
+
+        // Render loop: draw video frames to our shared canvas
+        function drawFrame() {
+            if (!rtcViewerActive) return;
+            if (rtcViewerVideoEl.videoWidth > 0) {
+                if (canvas.width !== rtcViewerVideoEl.videoWidth ||
+                    canvas.height !== rtcViewerVideoEl.videoHeight) {
+                    canvas.width = rtcViewerVideoEl.videoWidth;
+                    canvas.height = rtcViewerVideoEl.videoHeight;
+                }
+                ctx.drawImage(rtcViewerVideoEl, 0, 0);
+
+                sbRes.textContent = rtcViewerVideoEl.videoWidth + "\u00D7" + rtcViewerVideoEl.videoHeight;
+                overlay.classList.add("hidden");
+                frameCount++;
+            }
+            requestAnimationFrame(drawFrame);
+        }
+        requestAnimationFrame(drawFrame);
+    }
+
+    function _rtcAttachViewerAudio(stream) {
+        // Use the WebRTC audio track directly through Web Audio API for volume control
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: AUDIO_RATE });
+            gainNode = audioCtx.createGain();
+            gainNode.gain.value = volSlider.value / 100;
+            gainNode.connect(audioCtx.destination);
+        }
+        if (audioCtx.state === "suspended") audioCtx.resume();
+
+        const source = audioCtx.createMediaStreamSource(stream);
+        source.connect(gainNode);
+
+        audioStarted = true;
+        audioBtn.style.display = "none";
+        sbAudio.textContent = "Audio: WebRTC Opus";
+    }
+
+    async function _rtcUpdateViewerStats() {
+        if (!rtcViewerPC) return;
+        try {
+            const stats = await rtcViewerPC.getStats();
+            let codec = "—", bitrate = "—";
+            let bytesReceived = 0, timestamp = 0;
+            stats.forEach(report => {
+                if (report.type === "codec" && report.mimeType && report.mimeType.startsWith("video/")) {
+                    codec = report.mimeType.replace("video/", "");
+                }
+                if (report.type === "inbound-rtp" && report.kind === "video") {
+                    bytesReceived = report.bytesReceived || 0;
+                    timestamp = report.timestamp || 0;
+                }
+            });
+            sbServer.textContent = `WebRTC | Codec: ${codec}`;
+        } catch (_) {}
+
+        // Update every 2 seconds
+        if (rtcViewerActive) {
+            setTimeout(_rtcUpdateViewerStats, 2000);
+        }
+    }
+
     /* ── Initial status fetch ── */
     fetch("/api/status")
         .then(r => r.json())
-        .then(d => { sbServer.textContent = "Server: " + d.relay_host; })
+        .then(d => {
+            sbServer.textContent = "Server: " + d.relay_host;
+            if (d.webrtc_enabled) {
+                sbServer.textContent += " | WebRTC ready";
+            }
+        })
         .catch(() => {});
 
     /* ── Boot ── */

@@ -144,8 +144,8 @@ class ScreenCapture:
                     budget_bytes = self.bitrate * 1000 // 8  # kbps -> bytes/sec
                     usage = self._bytes_this_sec / budget_bytes if budget_bytes > 0 else 0
                     if usage > 1.0:
-                        # Over budget: lower quality (min 40)
-                        self._adaptive_quality = max(40, self._adaptive_quality - 3)
+                        # Over budget: lower quality (min 50 for LAN clarity)
+                        self._adaptive_quality = max(50, self._adaptive_quality - 3)
                     elif usage < 0.8:
                         # Under budget: raise quality back toward target
                         self._adaptive_quality = min(self.quality, self._adaptive_quality + 1)

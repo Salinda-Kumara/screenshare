@@ -34,6 +34,9 @@ from config import (
     AUDIO_RATE, AUDIO_CHANNELS, AUDIO_FORMAT_WIDTH,
     ROLE_VIEWER, ROLE_SHARER, MSG_SELECT_SHARER, MSG_SHARER_LIST,
     CONNECT_TIMEOUT, RECV_TIMEOUT, WEB_PORT,
+    WEBRTC_ENABLED, WEBRTC_SIGNALING_PATH,
+    WEBRTC_VIDEO_BITRATE, WEBRTC_MAX_BITRATE, WEBRTC_MIN_BITRATE,
+    WEBRTC_PREFERRED_CODECS, WEBRTC_AUDIO_BITRATE, WEBRTC_ICE_SERVERS,
 )
 from network_utils import configure_socket, send_frame, recv_frame
 from discovery import DiscoveryClient
@@ -412,6 +415,9 @@ class WebViewerApp:
         self.bridge = bridge
         self.web_port = web_port
         self.app = web.Application()
+        # WebRTC signaling rooms: {room_id: {"sharer": ws, "viewers": [ws, ...]}}
+        self._rtc_rooms: dict = {}
+        self._rtc_rooms_lock = asyncio.Lock()
         self._setup_routes()
         self.app.on_startup.append(self._on_startup)
 
@@ -422,7 +428,9 @@ class WebViewerApp:
         self.app.router.add_get("/ws/control", self._handle_ws_control)
         self.app.router.add_get("/ws/share/screen", self._handle_ws_share_screen)
         self.app.router.add_get("/ws/share/audio", self._handle_ws_share_audio)
+        self.app.router.add_get(WEBRTC_SIGNALING_PATH, self._handle_ws_rtc_signaling)
         self.app.router.add_get("/api/status", self._handle_status)
+        self.app.router.add_get("/api/rtc-config", self._handle_rtc_config)
 
         static_dir = os.path.join(BASE_DIR, "static")
         if os.path.isdir(static_dir):
@@ -447,6 +455,19 @@ class WebViewerApp:
             "control_connected": self.bridge.control_connected,
             "sharers": self.bridge.sharers,
             "active_sharer_id": self.bridge.active_sharer_id,
+            "webrtc_enabled": WEBRTC_ENABLED,
+        })
+
+    async def _handle_rtc_config(self, request):
+        """Return WebRTC configuration for browser peers."""
+        return web.json_response({
+            "enabled": WEBRTC_ENABLED,
+            "iceServers": WEBRTC_ICE_SERVERS,
+            "videoBitrate": WEBRTC_VIDEO_BITRATE,
+            "maxBitrate": WEBRTC_MAX_BITRATE,
+            "minBitrate": WEBRTC_MIN_BITRATE,
+            "preferredCodecs": WEBRTC_PREFERRED_CODECS,
+            "audioBitrate": WEBRTC_AUDIO_BITRATE,
         })
 
     # ── Screen WebSocket ──
@@ -680,6 +701,133 @@ class WebViewerApp:
             log.info("Browser sharer audio WS disconnected: %s", name)
         return ws
 
+    # ── WebRTC Signaling WebSocket ──
+    #
+    # Pure signaling relay: the server never touches media.
+    # Sharer creates a room, viewers join.  SDP offers/answers and
+    # ICE candidates are forwarded between peers so they can establish
+    # a direct UDP (DTLS-SRTP) media channel on the LAN.
+
+    async def _handle_ws_rtc_signaling(self, request):
+        ws = web.WebSocketResponse(compress=False)
+        await ws.prepare(request)
+
+        role = request.query.get("role", "viewer")   # "sharer" | "viewer"
+        room = request.query.get("room", "default")   # room id (= sharer name)
+        peer_id = id(ws)
+
+        log.info("WebRTC signaling WS: role=%s room=%s peer=%d (%s)",
+                 role, room, peer_id, request.remote)
+
+        async with self._rtc_rooms_lock:
+            if room not in self._rtc_rooms:
+                self._rtc_rooms[room] = {"sharer": None, "viewers": {}}
+
+            room_data = self._rtc_rooms[room]
+            if role == "sharer":
+                # Kick old sharer if any
+                old = room_data["sharer"]
+                if old and not old.closed:
+                    await old.send_str(json.dumps({"type": "kicked"}))
+                    await old.close()
+                room_data["sharer"] = ws
+            else:
+                room_data["viewers"][peer_id] = ws
+
+        # Notify sharer of new viewer joining
+        if role == "viewer":
+            async with self._rtc_rooms_lock:
+                sharer_ws = self._rtc_rooms.get(room, {}).get("sharer")
+            if sharer_ws and not sharer_ws.closed:
+                try:
+                    await sharer_ws.send_str(json.dumps({
+                        "type": "viewer_joined",
+                        "peerId": peer_id,
+                    }))
+                except Exception:
+                    pass
+
+        try:
+            async for msg in ws:
+                if msg.type == web.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                    except Exception:
+                        continue
+
+                    data["from"] = peer_id
+                    msg_type = data.get("type", "")
+
+                    async with self._rtc_rooms_lock:
+                        rd = self._rtc_rooms.get(room)
+                        if not rd:
+                            continue
+
+                    if role == "sharer":
+                        # Sharer → specific viewer (offer, answer, candidate)
+                        target = data.get("to")
+                        if target:
+                            async with self._rtc_rooms_lock:
+                                vws = rd["viewers"].get(target)
+                            if vws and not vws.closed:
+                                await vws.send_str(json.dumps(data))
+                        else:
+                            # Broadcast to all viewers
+                            async with self._rtc_rooms_lock:
+                                viewers = list(rd["viewers"].values())
+                            for v in viewers:
+                                if not v.closed:
+                                    try:
+                                        await v.send_str(json.dumps(data))
+                                    except Exception:
+                                        pass
+                    else:
+                        # Viewer → sharer (answer, candidate)
+                        async with self._rtc_rooms_lock:
+                            sws = rd["sharer"]
+                        if sws and not sws.closed:
+                            await sws.send_str(json.dumps(data))
+
+                elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
+                    break
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        except Exception as exc:
+            log.debug("RTC signaling WS error: %s", exc)
+        finally:
+            # Cleanup
+            async with self._rtc_rooms_lock:
+                rd = self._rtc_rooms.get(room)
+                if rd:
+                    if role == "sharer" and rd["sharer"] is ws:
+                        rd["sharer"] = None
+                        # Notify viewers that sharer left
+                        for v in rd["viewers"].values():
+                            if not v.closed:
+                                try:
+                                    await v.send_str(json.dumps({"type": "sharer_left"}))
+                                except Exception:
+                                    pass
+                    elif role == "viewer":
+                        rd["viewers"].pop(peer_id, None)
+                        # Notify sharer that viewer left
+                        sws = rd["sharer"]
+                        if sws and not sws.closed:
+                            try:
+                                await sws.send_str(json.dumps({
+                                    "type": "viewer_left",
+                                    "peerId": peer_id,
+                                }))
+                            except Exception:
+                                pass
+                    # Remove empty rooms
+                    if not rd["sharer"] and not rd["viewers"]:
+                        del self._rtc_rooms[room]
+
+            log.info("WebRTC signaling WS disconnected: role=%s room=%s peer=%d",
+                     role, room, peer_id)
+        return ws
+
     # ── run ──
 
     def run(self, ssl_context=None):
@@ -826,6 +974,7 @@ def main():
     print(f"{'=' * 55}")
     print(f"  Relay server : {relay_host}")
     print(f"  Web UI       : {scheme}://{local_ip}:{args.web_port}")
+    print(f"  WebRTC       : {'enabled (AV1/H264/VP9 peer-to-peer)' if WEBRTC_ENABLED else 'disabled'}")
     if scheme == "https":
         print(f"  SSL          : enabled (self-signed)")
         print(f"  NOTE: Accept the browser certificate warning on first visit.")

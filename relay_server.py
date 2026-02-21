@@ -28,6 +28,7 @@ from config import (
     MSG_START_SHARE, MSG_STOP_SHARE, MSG_SELECT_SHARER,
     HEADER_SIZE, HEADER_FORMAT, MAGIC, SOCKET_BUFFER,
     BROADCAST_ADDR, DISCOVERY_MSG, DISCOVERY_RESPONSE_PREFIX,
+    WEBRTC_ENABLED,
 )
 from network_utils import configure_socket, send_frame, recv_frame
 
@@ -82,6 +83,8 @@ class RelayServer:
         log.info("  Audio relay  : port %d", AUDIO_PORT)
         log.info("  Control      : port %d", CONTROL_PORT)
         log.info("  Discovery    : port %d/udp", DISCOVERY_PORT)
+        log.info("  WebRTC       : %s (browser peer-to-peer)",
+                 "enabled" if WEBRTC_ENABLED else "disabled")
         log.info("=" * 55)
 
         try:
@@ -123,6 +126,7 @@ class RelayServer:
                         "audio_port": AUDIO_PORT,
                         "control_port": CONTROL_PORT,
                         "type": "relay_server",
+                        "webrtc_enabled": WEBRTC_ENABLED,
                     }).encode("utf-8")
                     sock.sendto(DISCOVERY_RESPONSE_PREFIX + resp, addr)
                     log.info("Discovery reply → %s", addr[0])

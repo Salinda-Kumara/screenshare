@@ -25,13 +25,22 @@ MSG_SERVER_INFO = "server_info"      # Server → Client: server status
 SCREEN_FPS = 60
 SCREEN_QUALITY = 100  # JPEG quality (1-100) – maximum quality
 SCREEN_RESIZE_FACTOR = 1.0  # 1.0 = full resolution
-VIDEO_BITRATE = 5000  # Target bitrate in kbps
+VIDEO_BITRATE = 8000  # Target bitrate in kbps (higher for LAN clarity)
 
 # Audio
 AUDIO_RATE = 48000
 AUDIO_CHANNELS = 2  # Stereo for full quality
 AUDIO_CHUNK = 4096
 AUDIO_FORMAT_WIDTH = 2  # 16-bit audio
+
+# WebRTC (browser ↔ browser path — lowest latency, HW-accelerated codec)
+WEBRTC_ENABLED = True
+WEBRTC_VIDEO_BITRATE = 8_000_000   # 8 Mbps — generous for LAN
+WEBRTC_MAX_BITRATE = 15_000_000    # 15 Mbps cap
+WEBRTC_MIN_BITRATE = 2_000_000     # 2 Mbps floor
+WEBRTC_PREFERRED_CODECS = ["video/AV1", "video/H264", "video/VP9"]  # AV1 > H264 > VP9
+WEBRTC_AUDIO_BITRATE = 128_000     # 128 kbps Opus stereo
+WEBRTC_ICE_SERVERS = []            # Empty = LAN-only (no STUN/TURN needed)
 
 # Protocol header: 4 bytes magic + 4 bytes length
 MAGIC = b"LSHR"
@@ -45,3 +54,4 @@ CONNECT_TIMEOUT = 5.0
 
 # Web viewer
 WEB_PORT = 1000
+WEBRTC_SIGNALING_PATH = "/ws/rtc"  # WebSocket path for WebRTC signaling
