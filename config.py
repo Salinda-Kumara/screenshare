@@ -23,7 +23,7 @@ MSG_SERVER_INFO = "server_info"      # Server → Client: server status
 
 # Screen capture
 SCREEN_FPS = 60
-SCREEN_QUALITY = 95  # JPEG quality (1-100) – near-lossless for screen content
+SCREEN_QUALITY = 100  # JPEG quality (1-100) – maximum quality
 SCREEN_RESIZE_FACTOR = 1.0  # 1.0 = full resolution
 
 # Audio

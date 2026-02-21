@@ -408,8 +408,8 @@
     </div>
     <div class="setting-row">
         <span class="setting-label">JPEG Quality</span>
-        <input type="range" id="set-quality" min="30" max="100" value="95" step="5">
-        <span class="setting-value" id="set-quality-val">95%</span>
+        <input type="range" id="set-quality" min="30" max="100" value="100" step="5">
+        <span class="setting-value" id="set-quality-val">100%</span>
     </div>
     <div class="hint">95-100% = near-lossless. Lower values save bandwidth.</div>
     <div class="setting-row">
@@ -477,9 +477,9 @@
 
     /* ── Quality Settings (user-adjustable, persisted in localStorage) ── */
     const PRESETS = {
-        performance: { maxDim: 1280, jpegQ: 0.55, fps: 20 },
-        balanced:    { maxDim: 1920, jpegQ: 0.80, fps: 30 },
-        quality:     { maxDim: 1920, jpegQ: 0.95, fps: 60 },
+        performance: { maxDim: 1280, jpegQ: 0.60, fps: 20 },
+        balanced:    { maxDim: 1920, jpegQ: 0.85, fps: 30 },
+        quality:     { maxDim: 1920, jpegQ: 1.00, fps: 60 },
         ultra:       { maxDim: 9999, jpegQ: 1.00, fps: 60 },
     };
     const DEFAULT_SETTINGS = { ...PRESETS.quality, preset: 'quality' };

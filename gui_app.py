@@ -676,13 +676,13 @@ class App:
         settings.pack(fill="x", pady=(0, 12))
 
         ttk.Label(settings, text="JPEG Quality:", style="Sub.TLabel").grid(row=0, column=0, sticky="w", padx=5, pady=4)
-        self._quality_var = tk.IntVar(value=50)
-        q_sc = ttk.Scale(settings, from_=10, to=95, variable=self._quality_var, orient="horizontal")
+        self._quality_var = tk.IntVar(value=100)
+        q_sc = ttk.Scale(settings, from_=10, to=100, variable=self._quality_var, orient="horizontal")
         q_sc.grid(row=0, column=1, sticky="ew", padx=5, pady=4)
 
         ttk.Label(settings, text="FPS:", style="Sub.TLabel").grid(row=1, column=0, sticky="w", padx=5, pady=4)
-        self._fps_var = tk.IntVar(value=24)
-        ttk.Combobox(settings, textvariable=self._fps_var, values=[10, 15, 20, 24, 30],
+        self._fps_var = tk.IntVar(value=60)
+        ttk.Combobox(settings, textvariable=self._fps_var, values=[10, 15, 20, 24, 30, 60],
                       width=6, state="readonly").grid(row=1, column=1, sticky="w", padx=5, pady=4)
 
         # Audio device
