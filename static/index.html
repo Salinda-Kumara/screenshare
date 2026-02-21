@@ -112,6 +112,7 @@
         }
         #screen-canvas {
             display: block;
+            image-rendering: high-quality;
         }
 
         /* Overlay (waiting / disconnected) */
@@ -393,29 +394,30 @@
         <button class="preset-btn" data-preset="performance">&#x26A1; Low Latency</button>
         <button class="preset-btn" data-preset="balanced">&#x2696; Balanced</button>
         <button class="preset-btn active" data-preset="quality">&#x1F3A8; Max Quality</button>
+        <button class="preset-btn" data-preset="ultra">&#x1F48E; Ultra</button>
     </div>
     <div class="setting-row">
         <span class="setting-label">Resolution</span>
         <select id="set-resolution">
             <option value="1024">1024px (fastest)</option>
             <option value="1280">1280px (fast)</option>
-            <option value="1600" selected>1600px (balanced)</option>
+            <option value="1600">1600px (balanced)</option>
             <option value="1920">1920px (HD)</option>
-            <option value="9999">Original (no limit)</option>
+            <option value="9999" selected>Original (no limit)</option>
         </select>
     </div>
     <div class="setting-row">
         <span class="setting-label">JPEG Quality</span>
-        <input type="range" id="set-quality" min="30" max="95" value="60" step="5">
-        <span class="setting-value" id="set-quality-val">60%</span>
+        <input type="range" id="set-quality" min="30" max="100" value="95" step="5">
+        <span class="setting-value" id="set-quality-val">95%</span>
     </div>
-    <div class="hint">Lower = faster but softer image. 50-70% recommended.</div>
+    <div class="hint">95-100% = near-lossless. Lower values save bandwidth.</div>
     <div class="setting-row">
         <span class="setting-label">Max FPS</span>
-        <input type="range" id="set-fps" min="5" max="60" value="30" step="5">
-        <span class="setting-value" id="set-fps-val">30</span>
+        <input type="range" id="set-fps" min="5" max="60" value="60" step="5">
+        <span class="setting-value" id="set-fps-val">60</span>
     </div>
-    <div class="hint">Lower FPS = less CPU/bandwidth. 15-30 recommended.</div>
+    <div class="hint">60 FPS for buttery-smooth. Lower saves CPU/bandwidth.</div>
     <div class="setting-row">
         <span class="setting-label">&#x1F4CA; Stats</span>
         <span class="setting-value" id="set-stats" style="min-width:auto;font-weight:400;color:#808098">—</span>
@@ -450,7 +452,7 @@
 
     /* ── DOM refs ── */
     const canvas      = document.getElementById("screen-canvas");
-    const ctx         = canvas.getContext("2d");
+    const ctx         = canvas.getContext("2d", { alpha: false, desynchronized: true });
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     const overlay     = document.getElementById("overlay");
@@ -477,7 +479,8 @@
     const PRESETS = {
         performance: { maxDim: 1280, jpegQ: 0.55, fps: 20 },
         balanced:    { maxDim: 1920, jpegQ: 0.75, fps: 30 },
-        quality:     { maxDim: 9999, jpegQ: 0.92, fps: 60 },
+        quality:     { maxDim: 9999, jpegQ: 0.95, fps: 60 },
+        ultra:       { maxDim: 9999, jpegQ: 1.00, fps: 60 },
     };
     const DEFAULT_SETTINGS = { ...PRESETS.quality, preset: 'quality' };
 
@@ -621,15 +624,23 @@
             try {
                 const bmp  = await createImageBitmap(ev.data);
 
-                // resize canvas to container
+                // High-DPI aware canvas sizing
+                const dpr = window.devicePixelRatio || 1;
                 const cw = canvasWrap.clientWidth;
                 const ch = canvasWrap.clientHeight;
-                if (canvas.width !== cw || canvas.height !== ch) {
-                    canvas.width  = cw;
-                    canvas.height = ch;
+                const bw = Math.round(cw * dpr);
+                const bh = Math.round(ch * dpr);
+                if (canvas.width !== bw || canvas.height !== bh) {
+                    canvas.width  = bw;
+                    canvas.height = bh;
+                    canvas.style.width  = cw + "px";
+                    canvas.style.height = ch + "px";
+                    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                    ctx.imageSmoothingEnabled = true;
+                    ctx.imageSmoothingQuality = "high";
                 }
 
-                // aspect-ratio fit
+                // aspect-ratio fit (in CSS pixel space)
                 const scale = Math.min(cw / bmp.width, ch / bmp.height);
                 const dw = bmp.width  * scale;
                 const dh = bmp.height * scale;
