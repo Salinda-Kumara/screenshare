@@ -1071,25 +1071,7 @@
 
         setShareStatus("Connecting to server…", false);
 
-        // ── Try WebRTC path first (peer-to-peer, lowest latency, HW codecs) ──
-        if (rtcUseWebRTC && window.RTCPeerConnection) {
-            try {
-                await _startSharingWebRTC(name, shareStream, includeAudio);
-                sharing = true;
-                shareStartBtn.classList.add("hidden");
-                shareStopBtn.classList.remove("hidden");
-                shareCloseBtn.classList.add("hidden");
-                shareBtn.classList.add("active");
-                shareBtn.innerHTML = "&#x1F534; Sharing (WebRTC)";
-                setShareStatus("Sharing via WebRTC — " + name, false);
-                return;
-            } catch (e) {
-                console.warn("WebRTC sharing failed, falling back to WebSocket:", e);
-            }
-        }
-
-        // ── Fallback: WebSocket + JPEG path ──
-
+        // ── Always register with relay via WebSocket (so sharer appears in list) ──
         // Connect screen WebSocket
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
         const encodedName = encodeURIComponent(name);
@@ -1153,16 +1135,34 @@
             _startAudioCapture(shareStream);
         }
 
-        // Start capturing frames
+        // Start capturing frames (WebSocket/JPEG — always runs as fallback + for native viewers)
         sharing = true;
         shareStartBtn.classList.add("hidden");
         shareStopBtn.classList.remove("hidden");
         shareCloseBtn.classList.add("hidden");
         shareBtn.classList.add("active");
-        shareBtn.innerHTML = "&#x1F534; Sharing";
 
         _startFrameCapture(shareStream);
-        setShareStatus("Sharing — " + name, false);
+
+        // ── Additionally start WebRTC for browser viewers (better quality path) ──
+        let rtcMode = false;
+        if (rtcUseWebRTC && window.RTCPeerConnection) {
+            try {
+                await _startSharingWebRTC(name, shareStream, includeAudio);
+                rtcMode = true;
+                console.log("WebRTC sharing active alongside WebSocket fallback");
+            } catch (e) {
+                console.warn("WebRTC setup failed, WebSocket-only mode:", e);
+            }
+        }
+
+        shareBtn.innerHTML = rtcMode
+            ? "&#x1F534; Sharing (WebRTC)"
+            : "&#x1F534; Sharing";
+        setShareStatus(
+            (rtcMode ? "Sharing via WebRTC — " : "Sharing — ") + name,
+            false
+        );
     }
 
     function stopSharing() {
