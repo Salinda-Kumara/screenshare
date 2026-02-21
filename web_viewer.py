@@ -70,6 +70,7 @@ class RelayBridge:
         self._frame_lock = threading.Lock()
         self.latest_frame: bytes | None = None
         self.frame_seq = 0
+        self._frame_event = threading.Event()  # signalled on new frame
 
         # Audio (ring buffer of (seq, pcm_bytes))
         self._audio_lock = threading.Lock()
@@ -150,6 +151,7 @@ class RelayBridge:
                     with self._frame_lock:
                         self.latest_frame = jpeg
                         self.frame_seq += 1
+                    self._frame_event.set()  # wake up waiting WS handlers
 
             except Exception as exc:
                 if self.running:
@@ -432,9 +434,20 @@ class WebViewerApp:
 
                 if frame:
                     await ws.send_bytes(frame)
-                    await asyncio.sleep(0.005)
+                    await asyncio.sleep(0.002)
                 else:
-                    await asyncio.sleep(0.015)
+                    # Use event-driven wait with short timeout for low latency
+                    if hasattr(self.bridge, '_frame_event'):
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.get_event_loop().run_in_executor(
+                                    None, self.bridge._frame_event.wait, 0.05),
+                                timeout=0.05)
+                            self.bridge._frame_event.clear()
+                        except asyncio.TimeoutError:
+                            pass
+                    else:
+                        await asyncio.sleep(0.008)
         except (ConnectionResetError, asyncio.CancelledError):
             pass
         except Exception as exc:

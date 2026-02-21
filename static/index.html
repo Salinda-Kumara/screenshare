@@ -873,11 +873,13 @@
         video.play();
 
         const offCanvas = document.createElement("canvas");
-        const offCtx = offCanvas.getContext("2d");
+        const offCtx = offCanvas.getContext("2d", { alpha: false });
 
-        const MAX_DIM = 1280;  // Cap resolution for faster encoding
-        const INTERVAL = 50;   // ~20 FPS
+        const MAX_DIM = 1920;  // Full HD cap
+        const INTERVAL = 33;   // ~30 FPS
+        const JPEG_Q = 0.7;    // Higher quality
         let sending = false;
+        let lastW = 0, lastH = 0;  // Track size to avoid resetting canvas each frame
 
         // Use a Web Worker for timing so capture continues in background tabs
         const workerCode = `
@@ -906,8 +908,14 @@
                 h = Math.round(h * scale);
             }
 
-            offCanvas.width = w;
-            offCanvas.height = h;
+            // Only resize canvas when dimensions change (avoids costly clear)
+            if (lastW !== w || lastH !== h) {
+                offCanvas.width = w;
+                offCanvas.height = h;
+                lastW = w;
+                lastH = h;
+            }
+
             offCtx.drawImage(video, 0, 0, w, h);
 
             // Draw software cursor onto the frame
@@ -935,7 +943,7 @@
                 } else {
                     sending = false;
                 }
-            }, "image/jpeg", 0.5);
+            }, "image/jpeg", JPEG_Q);
         }
 
         timerWorker.onmessage = captureFrame;
