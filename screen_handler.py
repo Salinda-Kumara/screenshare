@@ -112,6 +112,15 @@ class ScreenCapture:
                         new_h = int(h * self.resize_factor)
                         frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
+                    # Scale to 1920x1080 if larger (aspect-ratio aware)
+                    h, w = frame.shape[:2]
+                    target_w, target_h = 1920, 1080
+                    if w > target_w or h > target_h:
+                        scale = min(target_w / w, target_h / h)
+                        new_w = int(w * scale)
+                        new_h = int(h * scale)
+                        frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
                     # Encode to JPEG
                     _, buffer = cv2.imencode('.jpg', frame,
                                              [cv2.IMWRITE_JPEG_QUALITY, self.quality])
