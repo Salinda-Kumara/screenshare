@@ -113,9 +113,6 @@
         #screen-canvas {
             display: block;
             image-rendering: high-quality;
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
         }
 
         /* Overlay (waiting / disconnected) */
@@ -455,7 +452,7 @@
 
     /* ── DOM refs ── */
     const canvas      = document.getElementById("screen-canvas");
-    const ctx         = canvas.getContext("2d", { alpha: false });
+    const ctx         = canvas.getContext("2d", { alpha: false, desynchronized: true });
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     const overlay     = document.getElementById("overlay");
@@ -479,6 +476,7 @@
     const RECONNECT_MS   = 2000;
 
     /* ── Quality Settings (user-adjustable, persisted in localStorage) ── */
+    const VIDEO_BITRATE_KBPS = 5000;  // Target bitrate budget in kbps
     const PRESETS = {
         performance: { maxDim: 1280, jpegQ: 0.60, fps: 20 },
         balanced:    { maxDim: 1920, jpegQ: 0.85, fps: 30 },
@@ -515,6 +513,11 @@
     // Frame size tracking for stats
     let lastFrameSize = 0;
     let avgFrameSize  = 0;
+
+    // Bitrate budget tracking (shared with capture loop)
+    let _brBytesSent = 0;
+    let _brSecStart = performance.now();
+    let _brAdaptiveQ = 1.0;
 
     function syncSettingsUI() {
         setResolution.value = String(shareSettings.maxDim);
@@ -593,7 +596,8 @@
         if (sharing && lastFrameSize > 0) {
             const kb = (avgFrameSize / 1024).toFixed(0);
             const bw = (avgFrameSize * shareSettings.fps / 1024).toFixed(0);
-            setStats.textContent = `${kb} KB/frame · ~${bw} KB/s`;
+            const q = Math.round(_brAdaptiveQ * 100);
+            setStats.textContent = `${kb} KB/f · ~${bw} KB/s · Q:${q}%`;
         } else {
             setStats.textContent = '\u2014';
         }
@@ -622,38 +626,37 @@
 
         let lastFrameTime = 0;
         ws.onmessage = async (ev) => {
-            // Handle text messages (e.g. no_stream signal)
-            if (typeof ev.data === 'string') {
-                try {
-                    const msg = JSON.parse(ev.data);
-                    if (msg.type === 'no_stream') {
-                        // Sharer disconnected — clear canvas and show overlay
-                        const cw = canvas.width, ch = canvas.height;
-                        ctx.fillStyle = '#000';
-                        ctx.fillRect(0, 0, cw, ch);
-                        overlay.classList.remove('hidden');
-                        overlayText.textContent = 'Waiting for screen stream\u2026';
-                        sbRes.textContent = '\u2014';
-                        sbFps.textContent = '\u2014 fps';
-                    }
-                } catch(_) {}
-                return;
-            }
             if (rendering) return;           // skip if prev frame still decoding
             rendering = true;
             try {
                 const bmp  = await createImageBitmap(ev.data);
 
-                // Set canvas to exact frame size (CSS handles display scaling)
-                if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
-                    canvas.width  = bmp.width;
-                    canvas.height = bmp.height;
+                // High-DPI aware canvas sizing
+                const dpr = window.devicePixelRatio || 1;
+                const cw = canvasWrap.clientWidth;
+                const ch = canvasWrap.clientHeight;
+                const bw = Math.round(cw * dpr);
+                const bh = Math.round(ch * dpr);
+                if (canvas.width !== bw || canvas.height !== bh) {
+                    canvas.width  = bw;
+                    canvas.height = bh;
+                    canvas.style.width  = cw + "px";
+                    canvas.style.height = ch + "px";
+                    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
                     ctx.imageSmoothingEnabled = true;
                     ctx.imageSmoothingQuality = "high";
                 }
 
-                // Draw directly — no clearing needed, frame fills entire canvas
-                ctx.drawImage(bmp, 0, 0);
+                // aspect-ratio fit (in CSS pixel space)
+                const scale = Math.min(cw / bmp.width, ch / bmp.height);
+                const dw = bmp.width  * scale;
+                const dh = bmp.height * scale;
+                const dx = (cw - dw) / 2;
+                const dy = (ch - dh) / 2;
+
+                ctx.fillStyle = "#000";
+                ctx.fillRect(0, 0, cw, ch);
+                ctx.drawImage(bmp, dx, dy, dw, dh);
                 bmp.close && bmp.close();
 
                 sbRes.textContent = bmp.width + "\u00D7" + bmp.height;
@@ -1200,6 +1203,9 @@
         let sending = false;
         let lastW = 0, lastH = 0;
 
+        // Reset adaptive quality to current setting
+        _brAdaptiveQ = shareSettings.jpegQ;
+
         // ── Encoding Worker ──
         // JPEG encoding via OffscreenCanvas in a Worker — NOT throttled
         // when the browser tab is in the background.
@@ -1237,6 +1243,22 @@
                 if (buf && sharing && shareScreenWs && shareScreenWs.readyState === WebSocket.OPEN) {
                     lastFrameSize = buf.byteLength;
                     avgFrameSize = avgFrameSize ? avgFrameSize * 0.8 + buf.byteLength * 0.2 : buf.byteLength;
+
+                    // Bitrate budget enforcement
+                    const now = performance.now();
+                    if (now - _brSecStart >= 1000) {
+                        _brSecStart = now;
+                        _brBytesSent = 0;
+                    }
+                    _brBytesSent += buf.byteLength;
+                    const budgetBytes = VIDEO_BITRATE_KBPS * 1000 / 8;
+                    const usage = _brBytesSent / budgetBytes;
+                    if (usage > 1.0) {
+                        _brAdaptiveQ = Math.max(0.30, _brAdaptiveQ - 0.03);
+                    } else if (usage < 0.8) {
+                        _brAdaptiveQ = Math.min(shareSettings.jpegQ, _brAdaptiveQ + 0.01);
+                    }
+
                     if (shareScreenWs.bufferedAmount > buf.byteLength * 2) {
                         sending = false;
                         return;
@@ -1298,7 +1320,7 @@
             if (!shareScreenWs || shareScreenWs.readyState !== WebSocket.OPEN) return;
 
             const MAX_DIM = shareSettings.maxDim;
-            const JPEG_Q  = shareSettings.jpegQ;
+            const JPEG_Q  = _brAdaptiveQ;
 
             let w = video.videoWidth;
             let h = video.videoHeight;

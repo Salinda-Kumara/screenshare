@@ -25,6 +25,7 @@ MSG_SERVER_INFO = "server_info"      # Server → Client: server status
 SCREEN_FPS = 60
 SCREEN_QUALITY = 100  # JPEG quality (1-100) – maximum quality
 SCREEN_RESIZE_FACTOR = 1.0  # 1.0 = full resolution
+VIDEO_BITRATE = 5000  # Target bitrate in kbps
 
 # Audio
 AUDIO_RATE = 48000
