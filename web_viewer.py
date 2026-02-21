@@ -569,13 +569,24 @@ class WebViewerApp:
     # ── Screen WebSocket ──
 
     async def _handle_ws_screen(self, request):
-        ws = web.WebSocketResponse(compress=False)
+        ws = web.WebSocketResponse(compress=False, heartbeat=10.0)
         await ws.prepare(request)
         log.info("Browser screen WS connected (%s)", request.remote)
 
         last_seq = 0
         my_event = asyncio.Event()
         self.bridge.register_viewer_event(my_event)
+
+        # Reader task keeps ws.closed up-to-date (processes close/ping frames)
+        async def _ws_reader():
+            try:
+                async for msg in ws:
+                    if msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
+                        break
+            except Exception:
+                pass
+
+        reader_task = asyncio.create_task(_ws_reader())
 
         try:
             while not ws.closed and self.bridge.running:
@@ -586,7 +597,14 @@ class WebViewerApp:
                         last_seq = self.bridge.frame_seq
 
                 if frame:
-                    await ws.send_bytes(frame)
+                    # Backpressure: skip frame if WS write buffer is congested
+                    transport = getattr(ws, '_writer', None)
+                    if transport:
+                        transport = getattr(transport, 'transport', None)
+                    buf_size = transport.get_write_buffer_size() if transport else 0
+                    if buf_size < 2 * len(frame):
+                        await ws.send_bytes(frame)
+                    # else: skip frame — browser is behind
                 else:
                     my_event.clear()
                     with self.bridge._frame_lock:
@@ -601,6 +619,7 @@ class WebViewerApp:
         except Exception as exc:
             log.debug("Screen WS: %s", exc)
         finally:
+            reader_task.cancel()
             self.bridge.unregister_viewer_event(my_event)
             log.info("Browser screen WS disconnected")
         return ws
@@ -608,7 +627,7 @@ class WebViewerApp:
     # ── Audio WebSocket ──
 
     async def _handle_ws_audio(self, request):
-        ws = web.WebSocketResponse(compress=False)
+        ws = web.WebSocketResponse(compress=False, heartbeat=10.0)
         await ws.prepare(request)
         log.info("Browser audio WS connected (%s)", request.remote)
 
@@ -634,7 +653,7 @@ class WebViewerApp:
     # ── Control WebSocket ──
 
     async def _handle_ws_control(self, request):
-        ws = web.WebSocketResponse(compress=False)
+        ws = web.WebSocketResponse(compress=False, heartbeat=10.0)
         await ws.prepare(request)
         log.info("Browser control WS connected (%s)", request.remote)
 

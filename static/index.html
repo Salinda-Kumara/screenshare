@@ -668,10 +668,11 @@
     function connectScreen() {
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
         const ws = new WebSocket(`${proto}//${location.host}/ws/screen`);
-        ws.binaryType = "blob";
+        ws.binaryType = "arraybuffer";
 
         ws.onmessage = (ev) => {
-            // Always keep the latest blob; never drop silently
+            // Always keep the latest frame; never drop silently
+            // Store as ArrayBuffer (GC-friendly); create Blob only when decoding
             _screenPendingBlob = ev.data;
             if (!rendering) _renderNextFrame();
         };
@@ -680,9 +681,10 @@
             if (rendering) return;
             while (_screenPendingBlob) {
                 rendering = true;
-                const blob = _screenPendingBlob;
+                const buf = _screenPendingBlob;
                 _screenPendingBlob = null;    // grab & clear atomically
                 try {
+                    const blob = new Blob([buf], { type: "image/jpeg" });
                     const bmp = await createImageBitmap(blob);
                     // Only resize canvas when dimensions actually changed
                     if (_screenLastCanvasW !== bmp.width ||

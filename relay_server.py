@@ -159,7 +159,7 @@ class RelayServer:
                     threading.Thread(target=self._handle_screen_sharer,
                                      args=(client, addr), daemon=True).start()
                 elif role == ROLE_VIEWER:
-                    client.settimeout(None)  # Viewers wait indefinitely for frames
+                    client.settimeout(5.0)  # Drop slow viewers instead of blocking everyone
                     with self.screen_viewers_lock:
                         self.screen_viewers.append(client)
                     log.info("Screen viewer connected: %s", addr[0])
@@ -207,18 +207,24 @@ class RelayServer:
                     if self.active_sharer_id != sharer_id:
                         continue
 
-                # Relay to all viewers
-                dead = []
+                # Relay to all viewers (copy list so lock is held briefly)
                 with self.screen_viewers_lock:
-                    for v in self.screen_viewers:
-                        if not send_frame(v, frame):
-                            dead.append(v)
-                    for d in dead:
-                        try:
-                            d.close()
-                        except Exception:
-                            pass
-                        self.screen_viewers.remove(d)
+                    viewers_snapshot = list(self.screen_viewers)
+
+                dead = []
+                for v in viewers_snapshot:
+                    if not send_frame(v, frame):
+                        dead.append(v)
+
+                if dead:
+                    with self.screen_viewers_lock:
+                        for d in dead:
+                            try:
+                                d.close()
+                            except Exception:
+                                pass
+                            if d in self.screen_viewers:
+                                self.screen_viewers.remove(d)
 
         except ConnectionError:
             pass
@@ -254,7 +260,7 @@ class RelayServer:
                     threading.Thread(target=self._handle_audio_sharer,
                                      args=(client, addr), daemon=True).start()
                 elif role == ROLE_VIEWER:
-                    client.settimeout(None)  # Viewers wait indefinitely for audio
+                    client.settimeout(5.0)  # Drop slow viewers instead of blocking everyone
                     with self.audio_viewers_lock:
                         self.audio_viewers.append(client)
                     log.info("Audio viewer connected: %s", addr[0])
@@ -296,17 +302,23 @@ class RelayServer:
                     if self.active_sharer_id != sharer_id:
                         continue
 
-                dead = []
                 with self.audio_viewers_lock:
-                    for v in self.audio_viewers:
-                        if not send_frame(v, frame):
-                            dead.append(v)
-                    for d in dead:
-                        try:
-                            d.close()
-                        except Exception:
-                            pass
-                        self.audio_viewers.remove(d)
+                    audio_snapshot = list(self.audio_viewers)
+
+                dead = []
+                for v in audio_snapshot:
+                    if not send_frame(v, frame):
+                        dead.append(v)
+
+                if dead:
+                    with self.audio_viewers_lock:
+                        for d in dead:
+                            try:
+                                d.close()
+                            except Exception:
+                                pass
+                            if d in self.audio_viewers:
+                                self.audio_viewers.remove(d)
 
         except ConnectionError:
             pass
