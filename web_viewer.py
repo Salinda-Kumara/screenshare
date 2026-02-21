@@ -30,7 +30,7 @@ except ImportError:
 from config import (
     SCREEN_PORT, AUDIO_PORT, CONTROL_PORT,
     AUDIO_RATE, AUDIO_CHANNELS, AUDIO_FORMAT_WIDTH,
-    ROLE_VIEWER, MSG_SELECT_SHARER, MSG_SHARER_LIST,
+    ROLE_VIEWER, ROLE_SHARER, MSG_SELECT_SHARER, MSG_SHARER_LIST,
     CONNECT_TIMEOUT, RECV_TIMEOUT, WEB_PORT,
 )
 from network_utils import configure_socket, send_frame, recv_frame
@@ -237,6 +237,128 @@ class RelayBridge:
 
 
 # ═══════════════════════════════════════════════════════════════
+#  SHARER BRIDGE — forwards browser screen/audio to relay server
+# ═══════════════════════════════════════════════════════════════
+
+class SharerBridge:
+    """Connects to the relay server as a sharer and forwards
+    screen frames and audio received from a browser WebSocket."""
+
+    def __init__(self, host, sharer_name,
+                 screen_port=SCREEN_PORT, audio_port=AUDIO_PORT):
+        self.host = host
+        self.sharer_name = sharer_name
+        self.screen_port = screen_port
+        self.audio_port = audio_port
+
+        self._cctx = zstd.ZstdCompressor(level=1)
+
+        self._screen_sock: socket.socket | None = None
+        self._audio_sock: socket.socket | None = None
+        self._screen_lock = threading.Lock()
+        self._audio_lock = threading.Lock()
+
+        self.screen_connected = False
+        self.audio_connected = False
+        self.sharer_id = None
+
+    def connect_screen(self):
+        """Connect to relay as a screen sharer (blocking)."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            configure_socket(sock)
+            sock.settimeout(CONNECT_TIMEOUT)
+            sock.connect((self.host, self.screen_port))
+            sock.settimeout(None)
+
+            # Send role
+            sock.sendall(ROLE_SHARER)
+
+            # Send sharer info
+            info = json.dumps({"name": self.sharer_name}).encode("utf-8")
+            send_frame(sock, info)
+
+            with self._screen_lock:
+                self._screen_sock = sock
+            self.screen_connected = True
+            log.info("SharerBridge screen connected → %s:%d (%s)",
+                     self.host, self.screen_port, self.sharer_name)
+            return True
+        except Exception as exc:
+            log.warning("SharerBridge screen connect failed: %s", exc)
+            return False
+
+    def connect_audio(self):
+        """Connect to relay as an audio sharer (blocking)."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            configure_socket(sock)
+            sock.settimeout(CONNECT_TIMEOUT)
+            sock.connect((self.host, self.audio_port))
+            sock.settimeout(None)
+
+            sock.sendall(ROLE_SHARER)
+
+            info = json.dumps({
+                "name": self.sharer_name,
+                "sharer_id": self.sharer_id or -1,
+            }).encode("utf-8")
+            send_frame(sock, info)
+
+            with self._audio_lock:
+                self._audio_sock = sock
+            self.audio_connected = True
+            log.info("SharerBridge audio connected → %s:%d (%s)",
+                     self.host, self.audio_port, self.sharer_name)
+            return True
+        except Exception as exc:
+            log.warning("SharerBridge audio connect failed: %s", exc)
+            return False
+
+    def send_screen_frame(self, jpeg_bytes: bytes) -> bool:
+        """Compress and send a JPEG frame to the relay."""
+        with self._screen_lock:
+            sock = self._screen_sock
+        if not sock:
+            return False
+        try:
+            compressed = self._cctx.compress(jpeg_bytes)
+            return send_frame(sock, compressed)
+        except Exception:
+            self.screen_connected = False
+            return False
+
+    def send_audio_frame(self, pcm_bytes: bytes) -> bool:
+        """Compress and send a PCM audio frame to the relay."""
+        with self._audio_lock:
+            sock = self._audio_sock
+        if not sock:
+            return False
+        try:
+            compressed = self._cctx.compress(pcm_bytes)
+            return send_frame(sock, compressed)
+        except Exception:
+            self.audio_connected = False
+            return False
+
+    def close(self):
+        """Disconnect from relay."""
+        for lock, attr in [(self._screen_lock, "_screen_sock"),
+                           (self._audio_lock, "_audio_sock")]:
+            with lock:
+                sock = getattr(self, attr)
+                if sock:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+                    setattr(self, attr, None)
+        self.screen_connected = False
+        self.audio_connected = False
+        log.info("SharerBridge closed (%s)", self.sharer_name)
+
+
+# ═══════════════════════════════════════════════════════════════
 #  WEB SERVER — aiohttp serves HTML + WebSocket endpoints
 # ═══════════════════════════════════════════════════════════════
 
@@ -255,6 +377,8 @@ class WebViewerApp:
         self.app.router.add_get("/ws/screen", self._handle_ws_screen)
         self.app.router.add_get("/ws/audio", self._handle_ws_audio)
         self.app.router.add_get("/ws/control", self._handle_ws_control)
+        self.app.router.add_get("/ws/share/screen", self._handle_ws_share_screen)
+        self.app.router.add_get("/ws/share/audio", self._handle_ws_share_audio)
         self.app.router.add_get("/api/status", self._handle_status)
 
         static_dir = os.path.join(BASE_DIR, "static")
@@ -395,6 +519,91 @@ class WebViewerApp:
             recv_task.cancel()
 
         log.info("Browser control WS disconnected")
+        return ws
+
+    # ── Sharer Screen WebSocket ──
+
+    async def _handle_ws_share_screen(self, request):
+        ws = web.WebSocketResponse(max_msg_size=10 * 1024 * 1024)  # 10MB
+        await ws.prepare(request)
+
+        name = request.query.get("name", f"Browser ({request.remote})")
+        log.info("Browser sharer screen WS connected: %s (%s)", name, request.remote)
+
+        sharer = SharerBridge(
+            self.bridge.host, name,
+            screen_port=self.bridge.screen_port,
+            audio_port=self.bridge.audio_port,
+        )
+
+        # Connect to relay in a thread to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        ok = await loop.run_in_executor(None, sharer.connect_screen)
+        if not ok:
+            await ws.close(code=1011, message=b"Cannot connect to relay server")
+            return ws
+
+        # Send sharer_id back so the audio WS can reference it
+        await ws.send_str(json.dumps({
+            "type": "connected",
+            "sharer_id": sharer.sharer_id,
+        }))
+
+        try:
+            async for msg in ws:
+                if msg.type == web.WSMsgType.BINARY:
+                    ok = await loop.run_in_executor(
+                        None, sharer.send_screen_frame, msg.data)
+                    if not ok:
+                        break
+                elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
+                    break
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        except Exception as exc:
+            log.debug("Sharer screen WS: %s", exc)
+        finally:
+            await loop.run_in_executor(None, sharer.close)
+            log.info("Browser sharer screen WS disconnected: %s", name)
+        return ws
+
+    # ── Sharer Audio WebSocket ──
+
+    async def _handle_ws_share_audio(self, request):
+        ws = web.WebSocketResponse(max_msg_size=1 * 1024 * 1024)  # 1MB
+        await ws.prepare(request)
+
+        name = request.query.get("name", f"Browser ({request.remote})")
+        log.info("Browser sharer audio WS connected: %s (%s)", name, request.remote)
+
+        sharer = SharerBridge(
+            self.bridge.host, name,
+            screen_port=self.bridge.screen_port,
+            audio_port=self.bridge.audio_port,
+        )
+
+        loop = asyncio.get_event_loop()
+        ok = await loop.run_in_executor(None, sharer.connect_audio)
+        if not ok:
+            await ws.close(code=1011, message=b"Cannot connect to relay server")
+            return ws
+
+        try:
+            async for msg in ws:
+                if msg.type == web.WSMsgType.BINARY:
+                    ok = await loop.run_in_executor(
+                        None, sharer.send_audio_frame, msg.data)
+                    if not ok:
+                        break
+                elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
+                    break
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        except Exception as exc:
+            log.debug("Sharer audio WS: %s", exc)
+        finally:
+            await loop.run_in_executor(None, sharer.close)
+            log.info("Browser sharer audio WS disconnected: %s", name)
         return ws
 
     # ── run ──

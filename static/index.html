@@ -156,6 +156,81 @@
         /* Fullscreen tweaks */
         body.fs .toolbar,
         body.fs .statusbar { display: none; }
+
+        /* ── Share panel ── */
+        .share-panel {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            background: #1a1a30;
+            border: 1px solid #36365a;
+            border-radius: 12px;
+            padding: 30px 40px;
+            z-index: 30;
+            text-align: center;
+            min-width: 340px;
+            box-shadow: 0 8px 32px rgba(0,0,0,.6);
+        }
+        .share-panel.hidden { display: none; }
+        .share-panel h2 {
+            color: #cdd6f4;
+            font-size: 20px;
+            margin-bottom: 8px;
+        }
+        .share-panel p {
+            color: #808098;
+            font-size: 13px;
+            margin-bottom: 18px;
+        }
+        .share-panel .btn-big {
+            display: inline-block;
+            background: #44446a;
+            color: #d0d0e0;
+            border: 1px solid #6666aa;
+            border-radius: 8px;
+            padding: 12px 28px;
+            font-size: 15px;
+            cursor: pointer;
+            transition: background .15s;
+            margin: 5px;
+        }
+        .share-panel .btn-big:hover { background: #5555aa; }
+        .share-panel .btn-big.danger { background: #663333; border-color: #aa4444; }
+        .share-panel .btn-big.danger:hover { background: #884444; }
+        .share-panel .share-status {
+            margin-top: 14px;
+            font-size: 12px;
+            color: #a6e3a1;
+        }
+        .share-panel .share-status.err { color: #f38ba8; }
+        .share-panel label {
+            display: block;
+            color: #808098;
+            font-size: 12px;
+            margin-bottom: 4px;
+            text-align: left;
+        }
+        .share-panel input[type="text"] {
+            width: 100%;
+            background: #22223c;
+            color: #d0d0e0;
+            border: 1px solid #36365a;
+            border-radius: 5px;
+            padding: 6px 10px;
+            font-size: 13px;
+            margin-bottom: 14px;
+            outline: none;
+        }
+        .share-options {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 14px;
+            font-size: 12px;
+            color: #808098;
+        }
+        .share-options input[type="checkbox"] { accent-color: #8888ff; }
     </style>
 </head>
 <body>
@@ -182,6 +257,23 @@
 
     <span class="sep"></span>
     <button class="btn" id="fs-btn" title="Fullscreen (F11)">&#x26F6;</button>
+    <button class="btn" id="share-btn" title="Share your screen">&#x1F4E4; Share</button>
+</div>
+
+<!-- ═══ Share Panel (overlay) ═══ -->
+<div class="share-panel hidden" id="share-panel">
+    <h2>&#x1F4E4; Share Your Screen</h2>
+    <p>Share your screen to this meeting via browser</p>
+    <label for="share-name">Your name:</label>
+    <input type="text" id="share-name" placeholder="Enter your name…">
+    <div class="share-options">
+        <input type="checkbox" id="share-audio-cb" checked>
+        <label for="share-audio-cb" style="display:inline;margin:0">Include system audio</label>
+    </div>
+    <button class="btn-big" id="share-start-btn">Start Sharing</button>
+    <button class="btn-big danger hidden" id="share-stop-btn">Stop Sharing</button>
+    <button class="btn-big" id="share-close-btn" style="background:#333;border-color:#555">Cancel</button>
+    <div class="share-status hidden" id="share-status"></div>
 </div>
 
 <!-- ═══ Screen area ═══ -->
@@ -544,6 +636,269 @@
         canvas.height = canvasWrap.clientHeight;
     });
     ro.observe(canvasWrap);
+
+    /* ────────────────────────────────
+       SCREEN SHARING (browser → server)
+    ──────────────────────────────── */
+    const sharePanel    = document.getElementById("share-panel");
+    const shareBtn      = document.getElementById("share-btn");
+    const shareStartBtn = document.getElementById("share-start-btn");
+    const shareStopBtn  = document.getElementById("share-stop-btn");
+    const shareCloseBtn = document.getElementById("share-close-btn");
+    const shareNameInp  = document.getElementById("share-name");
+    const shareAudioCb  = document.getElementById("share-audio-cb");
+    const shareStatusEl = document.getElementById("share-status");
+
+    let sharing         = false;
+    let shareStream     = null;  // MediaStream
+    let shareScreenWs   = null;  // WebSocket for screen frames
+    let shareAudioWs    = null;  // WebSocket for audio PCM
+    let shareCaptureId  = null;  // interval id
+    let shareAudioCtx   = null;
+    let shareAudioProc  = null;
+    let shareCursorX    = -1;   // mouse X (screen or client coords)
+    let shareCursorY    = -1;   // mouse Y
+    let shareSurface    = 'unknown'; // 'monitor' | 'window' | 'browser'
+
+    shareBtn.addEventListener("click", () => {
+        sharePanel.classList.toggle("hidden");
+    });
+    shareCloseBtn.addEventListener("click", () => {
+        sharePanel.classList.add("hidden");
+    });
+    shareStartBtn.addEventListener("click", startSharing);
+    shareStopBtn.addEventListener("click", stopSharing);
+
+    async function startSharing() {
+        const name = shareNameInp.value.trim() || ("Browser-" + Math.random().toString(36).slice(2,6));
+        const includeAudio = shareAudioCb.checked;
+
+        setShareStatus("Requesting screen access…", false);
+
+        try {
+            // Request screen capture
+            const constraints = { video: { cursor: "always" } };
+            if (includeAudio) {
+                constraints.audio = {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
+                    sampleRate: 44100,
+                    channelCount: 1,
+                };
+            }
+            shareStream = await navigator.mediaDevices.getDisplayMedia(constraints);
+        } catch (err) {
+            setShareStatus("Screen access denied: " + err.message, true);
+            return;
+        }
+
+        // When user clicks "Stop sharing" in browser chrome
+        shareStream.getVideoTracks()[0].addEventListener("ended", stopSharing);
+
+        // Detect capture surface type for cursor coordinate mapping
+        const vSettings = shareStream.getVideoTracks()[0].getSettings();
+        shareSurface = vSettings.displaySurface || 'unknown';
+        document.addEventListener('mousemove', _onShareMouseMove);
+        document.addEventListener('mouseleave', _onShareMouseLeave);
+
+        setShareStatus("Connecting to server…", false);
+
+        // Connect screen WebSocket
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        const encodedName = encodeURIComponent(name);
+        shareScreenWs = new WebSocket(
+            `${proto}//${location.host}/ws/share/screen?name=${encodedName}`);
+        shareScreenWs.binaryType = "arraybuffer";
+
+        shareScreenWs.onclose = () => {
+            if (sharing) stopSharing();
+        };
+        shareScreenWs.onerror = () => {
+            setShareStatus("Screen WebSocket error", true);
+        };
+
+        await new Promise((resolve, reject) => {
+            shareScreenWs.onopen = resolve;
+            shareScreenWs.onerror = reject;
+        }).catch(() => {
+            setShareStatus("Failed to connect screen WS", true);
+            stopSharing();
+            return;
+        });
+
+        // Connect audio WebSocket if we have audio tracks
+        const audioTracks = shareStream.getAudioTracks();
+        if (includeAudio && audioTracks.length > 0) {
+            shareAudioWs = new WebSocket(
+                `${proto}//${location.host}/ws/share/audio?name=${encodedName}`);
+            shareAudioWs.binaryType = "arraybuffer";
+            await new Promise((resolve) => {
+                shareAudioWs.onopen = resolve;
+                setTimeout(resolve, 3000); // timeout fallback
+            });
+            _startAudioCapture(shareStream);
+        }
+
+        // Start capturing frames
+        sharing = true;
+        shareStartBtn.classList.add("hidden");
+        shareStopBtn.classList.remove("hidden");
+        shareCloseBtn.classList.add("hidden");
+        shareBtn.classList.add("active");
+        shareBtn.innerHTML = "&#x1F534; Sharing";
+
+        _startFrameCapture(shareStream);
+        setShareStatus("Sharing — " + name, false);
+    }
+
+    function stopSharing() {
+        sharing = false;
+        document.removeEventListener('mousemove', _onShareMouseMove);
+        document.removeEventListener('mouseleave', _onShareMouseLeave);
+        shareCursorX = -1; shareCursorY = -1;
+
+        if (shareCaptureId) { clearInterval(shareCaptureId); shareCaptureId = null; }
+        if (shareStream) {
+            shareStream.getTracks().forEach(t => t.stop());
+            shareStream = null;
+        }
+        if (shareScreenWs && shareScreenWs.readyState <= 1) shareScreenWs.close();
+        if (shareAudioWs && shareAudioWs.readyState <= 1) shareAudioWs.close();
+        shareScreenWs = null;
+        shareAudioWs = null;
+        if (shareAudioCtx) {
+            try { shareAudioCtx.close(); } catch(_) {}
+            shareAudioCtx = null;
+        }
+        shareAudioProc = null;
+
+        shareStartBtn.classList.remove("hidden");
+        shareStopBtn.classList.add("hidden");
+        shareCloseBtn.classList.remove("hidden");
+        shareBtn.classList.remove("active");
+        shareBtn.innerHTML = "&#x1F4E4; Share";
+        setShareStatus("Stopped", false);
+    }
+
+    function _onShareMouseMove(e) {
+        if (!sharing) return;
+        if (shareSurface === 'browser') {
+            shareCursorX = e.clientX;
+            shareCursorY = e.clientY;
+        } else {
+            shareCursorX = e.screenX;
+            shareCursorY = e.screenY;
+        }
+    }
+
+    function _onShareMouseLeave() {
+        shareCursorX = -1;
+        shareCursorY = -1;
+    }
+
+    function _drawCursorArrow(c, x, y) {
+        // Scale cursor based on resolution so it stays visible
+        const s = Math.max(1, Math.round(c.canvas.height / 540));
+        c.save();
+        c.translate(x, y);
+        c.scale(s, s);
+        c.beginPath();
+        c.moveTo(0, 0);
+        c.lineTo(0, 18);
+        c.lineTo(5.5, 13.5);
+        c.lineTo(9, 22);
+        c.lineTo(12.5, 20.5);
+        c.lineTo(8.5, 12);
+        c.lineTo(14, 12);
+        c.closePath();
+        c.fillStyle = '#fff';
+        c.fill();
+        c.strokeStyle = '#000';
+        c.lineWidth = 1.2;
+        c.stroke();
+        c.restore();
+    }
+
+    function setShareStatus(text, isErr) {
+        shareStatusEl.classList.remove("hidden");
+        shareStatusEl.classList.toggle("err", isErr);
+        shareStatusEl.textContent = text;
+    }
+
+    function _startFrameCapture(stream) {
+        const video = document.createElement("video");
+        video.srcObject = stream;
+        video.muted = true;
+        video.play();
+
+        const offCanvas = document.createElement("canvas");
+        const offCtx = offCanvas.getContext("2d");
+
+        const FPS = 15;
+        let sending = false;
+        shareCaptureId = setInterval(() => {
+            if (!sharing || sending) return;
+            if (video.videoWidth === 0) return;
+            if (!shareScreenWs || shareScreenWs.readyState !== WebSocket.OPEN) return;
+
+            offCanvas.width = video.videoWidth;
+            offCanvas.height = video.videoHeight;
+            offCtx.drawImage(video, 0, 0);
+
+            // Draw software cursor onto the frame
+            if (shareCursorX >= 0 && shareCursorY >= 0) {
+                let cx, cy;
+                if (shareSurface === 'browser') {
+                    // Tab capture: viewport coords → video coords
+                    cx = shareCursorX / window.innerWidth * video.videoWidth;
+                    cy = shareCursorY / window.innerHeight * video.videoHeight;
+                } else {
+                    // Screen/window capture: screen coords map directly
+                    cx = shareCursorX;
+                    cy = shareCursorY;
+                }
+                _drawCursorArrow(offCtx, cx, cy);
+            }
+
+            sending = true;
+            offCanvas.toBlob((blob) => {
+                if (blob && sharing && shareScreenWs && shareScreenWs.readyState === WebSocket.OPEN) {
+                    blob.arrayBuffer().then(buf => {
+                        try { shareScreenWs.send(buf); } catch(_) {}
+                        sending = false;
+                    });
+                } else {
+                    sending = false;
+                }
+            }, "image/jpeg", 0.6);
+        }, 1000 / FPS);
+    }
+
+    function _startAudioCapture(stream) {
+        try {
+            shareAudioCtx = new AudioContext({ sampleRate: 44100 });
+            const source = shareAudioCtx.createMediaStreamSource(stream);
+
+            // Use ScriptProcessor to get raw PCM
+            shareAudioProc = shareAudioCtx.createScriptProcessor(4096, 1, 1);
+            shareAudioProc.onaudioprocess = (e) => {
+                if (!sharing || !shareAudioWs || shareAudioWs.readyState !== WebSocket.OPEN) return;
+                const f32 = e.inputBuffer.getChannelData(0);
+                // Convert float32 → int16 PCM
+                const i16 = new Int16Array(f32.length);
+                for (let i = 0; i < f32.length; i++) {
+                    let s = Math.max(-1, Math.min(1, f32[i]));
+                    i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }
+                try { shareAudioWs.send(i16.buffer); } catch(_) {}
+            };
+            source.connect(shareAudioProc);
+            shareAudioProc.connect(shareAudioCtx.destination);
+        } catch (err) {
+            console.warn("Audio capture failed:", err);
+        }
+    }
 
     /* ── Initial status fetch ── */
     fetch("/api/status")
