@@ -113,6 +113,9 @@
         #screen-canvas {
             display: block;
             image-rendering: high-quality;
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
         }
 
         /* Overlay (waiting / disconnected) */
@@ -452,7 +455,7 @@
 
     /* ── DOM refs ── */
     const canvas      = document.getElementById("screen-canvas");
-    const ctx         = canvas.getContext("2d", { alpha: false, desynchronized: true });
+    const ctx         = canvas.getContext("2d", { alpha: false });
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     const overlay     = document.getElementById("overlay");
@@ -641,40 +644,16 @@
             try {
                 const bmp  = await createImageBitmap(ev.data);
 
-                // High-DPI aware canvas sizing
-                const dpr = window.devicePixelRatio || 1;
-                const cw = canvasWrap.clientWidth;
-                const ch = canvasWrap.clientHeight;
-                const bw = Math.round(cw * dpr);
-                const bh = Math.round(ch * dpr);
-                if (canvas.width !== bw || canvas.height !== bh) {
-                    canvas.width  = bw;
-                    canvas.height = bh;
-                    canvas.style.width  = cw + "px";
-                    canvas.style.height = ch + "px";
-                    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                // Set canvas to exact frame size (CSS handles display scaling)
+                if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+                    canvas.width  = bmp.width;
+                    canvas.height = bmp.height;
                     ctx.imageSmoothingEnabled = true;
                     ctx.imageSmoothingQuality = "high";
                 }
 
-                // aspect-ratio fit (in CSS pixel space)
-                const scale = Math.min(cw / bmp.width, ch / bmp.height);
-                const dw = bmp.width  * scale;
-                const dh = bmp.height * scale;
-                const dx = (cw - dw) / 2;
-                const dy = (ch - dh) / 2;
-
-                // Only clear letterbox bars, never the image area (prevents flicker)
-                ctx.fillStyle = "#000";
-                if (dy > 0) {
-                    ctx.fillRect(0, 0, cw, dy);              // top bar
-                    ctx.fillRect(0, dy + dh, cw, ch - dy - dh); // bottom bar
-                }
-                if (dx > 0) {
-                    ctx.fillRect(0, dy, dx, dh);              // left bar
-                    ctx.fillRect(dx + dw, dy, cw - dx - dw, dh); // right bar
-                }
-                ctx.drawImage(bmp, dx, dy, dw, dh);
+                // Draw directly — no clearing needed, frame fills entire canvas
+                ctx.drawImage(bmp, 0, 0);
                 bmp.close && bmp.close();
 
                 sbRes.textContent = bmp.width + "\u00D7" + bmp.height;
