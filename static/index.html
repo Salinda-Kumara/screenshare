@@ -664,8 +664,16 @@
                 const dx = (cw - dw) / 2;
                 const dy = (ch - dh) / 2;
 
+                // Only clear letterbox bars, never the image area (prevents flicker)
                 ctx.fillStyle = "#000";
-                ctx.fillRect(0, 0, cw, ch);
+                if (dy > 0) {
+                    ctx.fillRect(0, 0, cw, dy);              // top bar
+                    ctx.fillRect(0, dy + dh, cw, ch - dy - dh); // bottom bar
+                }
+                if (dx > 0) {
+                    ctx.fillRect(0, dy, dx, dh);              // left bar
+                    ctx.fillRect(dx + dw, dy, cw - dx - dw, dh); // right bar
+                }
                 ctx.drawImage(bmp, dx, dy, dw, dh);
                 bmp.close && bmp.close();
 
