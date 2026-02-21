@@ -451,6 +451,8 @@
     /* ── DOM refs ── */
     const canvas      = document.getElementById("screen-canvas");
     const ctx         = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     const overlay     = document.getElementById("overlay");
     const overlayText = document.getElementById("overlay-text");
     const dot         = document.getElementById("dot");

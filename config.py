@@ -22,8 +22,8 @@ MSG_KICK_SHARER = "kick_sharer"      # Server → Client: you've been replaced
 MSG_SERVER_INFO = "server_info"      # Server → Client: server status
 
 # Screen capture
-SCREEN_FPS = 24
-SCREEN_QUALITY = 50  # JPEG quality (1-100)
+SCREEN_FPS = 60
+SCREEN_QUALITY = 92  # JPEG quality (1-100)
 SCREEN_RESIZE_FACTOR = 1.0  # 1.0 = full resolution
 
 # Audio
