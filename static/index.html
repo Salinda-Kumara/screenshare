@@ -127,7 +127,7 @@
             z-index: 10;
             transition: opacity .3s;
         }
-        .overlay.hidden { opacity: 0; pointer-events: none; }
+        .overlay.hidden { opacity: 0; pointer-events: none; transition: opacity 0s; }
         .spinner {
             width: 44px; height: 44px;
             border: 3px solid #222;
@@ -660,39 +660,64 @@
     /* ────────────────────────────────
        SCREEN WebSocket
     ──────────────────────────────── */
+    let _screenOverlayTimer = null;        // delay before showing overlay
+    let _screenPendingBlob  = null;         // latest queued frame blob
+    let _screenLastCanvasW  = 0;
+    let _screenLastCanvasH  = 0;
+
     function connectScreen() {
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
         const ws = new WebSocket(`${proto}//${location.host}/ws/screen`);
         ws.binaryType = "blob";
 
-        // Track last known canvas size to avoid unnecessary clears
-        let _lastCanvasW = 0, _lastCanvasH = 0;
-
-        ws.onmessage = async (ev) => {
-            if (rendering) return;
-            rendering = true;
-            try {
-                const bmp = await createImageBitmap(ev.data);
-                // Only resize canvas if dimensions actually changed
-                if (_lastCanvasW !== bmp.width || _lastCanvasH !== bmp.height) {
-                    canvas.width = bmp.width;
-                    canvas.height = bmp.height;
-                    _lastCanvasW = bmp.width;
-                    _lastCanvasH = bmp.height;
-                }
-                ctx.drawImage(bmp, 0, 0);
-                bmp.close && bmp.close();
-
-                sbRes.textContent = bmp.width + "\u00D7" + bmp.height;
-                overlay.classList.add("hidden");
-                frameCount++;
-            } catch (_) {}
-            rendering = false;
+        ws.onmessage = (ev) => {
+            // Always keep the latest blob; never drop silently
+            _screenPendingBlob = ev.data;
+            if (!rendering) _renderNextFrame();
         };
 
+        async function _renderNextFrame() {
+            if (rendering) return;
+            while (_screenPendingBlob) {
+                rendering = true;
+                const blob = _screenPendingBlob;
+                _screenPendingBlob = null;    // grab & clear atomically
+                try {
+                    const bmp = await createImageBitmap(blob);
+                    // Only resize canvas when dimensions actually changed
+                    if (_screenLastCanvasW !== bmp.width ||
+                        _screenLastCanvasH !== bmp.height) {
+                        canvas.width  = bmp.width;
+                        canvas.height = bmp.height;
+                        _screenLastCanvasW = bmp.width;
+                        _screenLastCanvasH = bmp.height;
+                    }
+                    ctx.drawImage(bmp, 0, 0);
+                    bmp.close && bmp.close();
+
+                    sbRes.textContent = bmp.width + "\u00D7" + bmp.height;
+                    // Cancel any pending overlay-show timer on successful frame
+                    if (_screenOverlayTimer) {
+                        clearTimeout(_screenOverlayTimer);
+                        _screenOverlayTimer = null;
+                    }
+                    overlay.classList.add("hidden");
+                    frameCount++;
+                } catch (_) {}
+                rendering = false;
+                // Loop: if a newer blob arrived while we were rendering, draw it
+            }
+        }
+
         ws.onclose = () => {
-            overlay.classList.remove("hidden");
-            overlayText.textContent = "Reconnecting screen…";
+            // Delay overlay so brief reconnects don't flash
+            if (!_screenOverlayTimer) {
+                _screenOverlayTimer = setTimeout(() => {
+                    _screenOverlayTimer = null;
+                    overlay.classList.remove("hidden");
+                    overlayText.textContent = "Reconnecting screen…";
+                }, 800);
+            }
             setTimeout(connectScreen, RECONNECT_MS);
         };
         ws.onerror = () => {};
@@ -1894,6 +1919,10 @@
                     console.log("WebRTC viewer ICE:", rtcViewerPC.iceConnectionState);
                     const state = rtcViewerPC.iceConnectionState;
                     if (state === "connected" || state === "completed") {
+                        if (_screenOverlayTimer) {
+                            clearTimeout(_screenOverlayTimer);
+                            _screenOverlayTimer = null;
+                        }
                         overlay.classList.add("hidden");
                         rtcViewerActive = true;
                         setDot("ok", "Connected (WebRTC)");
@@ -1950,6 +1979,7 @@
 
         // Render loop: draw video frames to our shared canvas
         let _rtcLastW = 0, _rtcLastH = 0;
+        let _rtcOverlayHidden = false;
         function drawFrame() {
             if (!rtcViewerActive) return;
             if (rtcViewerVideoEl.videoWidth > 0) {
@@ -1964,7 +1994,14 @@
                 ctx.drawImage(rtcViewerVideoEl, 0, 0);
 
                 sbRes.textContent = rtcViewerVideoEl.videoWidth + "\u00D7" + rtcViewerVideoEl.videoHeight;
-                overlay.classList.add("hidden");
+                if (!_rtcOverlayHidden) {
+                    if (_screenOverlayTimer) {
+                        clearTimeout(_screenOverlayTimer);
+                        _screenOverlayTimer = null;
+                    }
+                    overlay.classList.add("hidden");
+                    _rtcOverlayHidden = true;
+                }
                 frameCount++;
             }
             requestAnimationFrame(drawFrame);
