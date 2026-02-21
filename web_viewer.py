@@ -185,6 +185,11 @@ class RelayBridge:
                     log.warning("Screen relay: %s", exc)
             finally:
                 self.screen_connected = False
+                # Clear the stale frame so viewers see "no stream"
+                with self._frame_lock:
+                    self.latest_frame = None
+                    self.frame_seq += 1
+                self._signal_viewers()
                 if sock:
                     try:
                         sock.close()
@@ -455,6 +460,7 @@ class WebViewerApp:
         log.info("Browser screen WS connected (%s)", request.remote)
 
         last_seq = 0
+        stream_active = True  # track whether we last sent a frame or a no_stream
         my_event = asyncio.Event()
         self.bridge.register_viewer_event(my_event)
         try:
@@ -467,7 +473,11 @@ class WebViewerApp:
 
                 if frame:
                     await ws.send_bytes(frame)
-                    # No sleep — send next frame as soon as available
+                    stream_active = True
+                elif frame is None and self.bridge.frame_seq > 0 and stream_active:
+                    # Sharer disconnected — notify viewer to clear screen
+                    await ws.send_str('{"type":"no_stream"}')
+                    stream_active = False
                 else:
                     # Pure-async wait: no thread-pool overhead
                     my_event.clear()

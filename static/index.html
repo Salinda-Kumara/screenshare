@@ -619,6 +619,23 @@
 
         let lastFrameTime = 0;
         ws.onmessage = async (ev) => {
+            // Handle text messages (e.g. no_stream signal)
+            if (typeof ev.data === 'string') {
+                try {
+                    const msg = JSON.parse(ev.data);
+                    if (msg.type === 'no_stream') {
+                        // Sharer disconnected — clear canvas and show overlay
+                        const cw = canvas.width, ch = canvas.height;
+                        ctx.fillStyle = '#000';
+                        ctx.fillRect(0, 0, cw, ch);
+                        overlay.classList.remove('hidden');
+                        overlayText.textContent = 'Waiting for screen stream\u2026';
+                        sbRes.textContent = '\u2014';
+                        sbFps.textContent = '\u2014 fps';
+                    }
+                } catch(_) {}
+                return;
+            }
             if (rendering) return;           // skip if prev frame still decoding
             rendering = true;
             try {
