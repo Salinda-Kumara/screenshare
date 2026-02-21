@@ -391,8 +391,8 @@
     <h2>&#x2699; Quality & Performance</h2>
     <div class="preset-row">
         <button class="preset-btn" data-preset="performance">&#x26A1; Low Latency</button>
-        <button class="preset-btn active" data-preset="balanced">&#x2696; Balanced</button>
-        <button class="preset-btn" data-preset="quality">&#x1F3A8; High Quality</button>
+        <button class="preset-btn" data-preset="balanced">&#x2696; Balanced</button>
+        <button class="preset-btn active" data-preset="quality">&#x1F3A8; Max Quality</button>
     </div>
     <div class="setting-row">
         <span class="setting-label">Resolution</span>
@@ -473,11 +473,11 @@
 
     /* ── Quality Settings (user-adjustable, persisted in localStorage) ── */
     const PRESETS = {
-        performance: { maxDim: 1024, jpegQ: 0.50, fps: 20 },
-        balanced:    { maxDim: 1600, jpegQ: 0.60, fps: 30 },
-        quality:     { maxDim: 1920, jpegQ: 0.80, fps: 30 },
+        performance: { maxDim: 1280, jpegQ: 0.55, fps: 20 },
+        balanced:    { maxDim: 1920, jpegQ: 0.75, fps: 30 },
+        quality:     { maxDim: 9999, jpegQ: 0.92, fps: 60 },
     };
-    const DEFAULT_SETTINGS = { ...PRESETS.balanced, preset: 'balanced' };
+    const DEFAULT_SETTINGS = { ...PRESETS.quality, preset: 'quality' };
 
     function loadSettings() {
         try {
