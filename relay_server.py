@@ -159,6 +159,7 @@ class RelayServer:
                     threading.Thread(target=self._handle_screen_sharer,
                                      args=(client, addr), daemon=True).start()
                 elif role == ROLE_VIEWER:
+                    client.settimeout(None)  # Viewers wait indefinitely for frames
                     with self.screen_viewers_lock:
                         self.screen_viewers.append(client)
                     log.info("Screen viewer connected: %s", addr[0])
@@ -191,6 +192,11 @@ class RelayServer:
             send_frame(sock, resp)
         except Exception:
             log.warning("Failed to send sharer_id to %s", name)
+
+        # Remove the tight initial timeout — browser sharers need time to
+        # start getDisplayMedia → encode first frame.  Use a generous
+        # timeout so we still detect dead connections.
+        sock.settimeout(60.0)
 
         try:
             while self.running:
@@ -248,6 +254,7 @@ class RelayServer:
                     threading.Thread(target=self._handle_audio_sharer,
                                      args=(client, addr), daemon=True).start()
                 elif role == ROLE_VIEWER:
+                    client.settimeout(None)  # Viewers wait indefinitely for audio
                     with self.audio_viewers_lock:
                         self.audio_viewers.append(client)
                     log.info("Audio viewer connected: %s", addr[0])
@@ -277,6 +284,9 @@ class RelayServer:
             if sharer_id in self.sharers:
                 self.sharers[sharer_id]["audio_sock"] = sock
         log.info("Audio sharer connected: %s (id=%d)", name, sharer_id)
+
+        # Generous timeout for browser sharers
+        sock.settimeout(60.0)
 
         try:
             while self.running:
@@ -338,6 +348,8 @@ class RelayServer:
     def _handle_control_client(self, sock, addr):
         """Handle control messages from a client."""
         log.info("Control client connected: %s", addr[0])
+        # Use generous timeout — control channel is mostly idle
+        sock.settimeout(120.0)
 
         # Send current sharer list immediately
         self._send_sharer_list(sock)

@@ -240,7 +240,7 @@ class RelayBridge:
                 configure_socket(sock)
                 sock.settimeout(CONNECT_TIMEOUT)
                 sock.connect((self.host, self.control_port))
-                sock.settimeout(30.0)
+                sock.settimeout(120.0)  # Control channel is mostly idle
                 with self._ctrl_lock:
                     self._ctrl_sock = sock
                 self.control_connected = True
