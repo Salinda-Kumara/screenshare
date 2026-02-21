@@ -72,6 +72,11 @@ class RelayBridge:
         self.frame_seq = 0
         self._frame_event = threading.Event()  # signalled on new frame
 
+        # Stream mode (WebM via MediaRecorder)
+        self.stream_init_segment: bytes | None = None
+        self._chunk_queue: collections.deque = collections.deque(maxlen=300)
+        self._is_stream = False
+
         # Async viewer notification (set from thread, awaited from asyncio)
         self._viewer_events: set = set()
         self._viewer_events_lock = threading.Lock()
@@ -134,6 +139,15 @@ class RelayBridge:
                     result.append((seq, data))
         return result
 
+    def get_chunks_since(self, since_seq):
+        """Return list of (seq, data) newer than *since_seq* from chunk queue."""
+        result = []
+        with self._frame_lock:
+            for seq, data in self._chunk_queue:
+                if seq > since_seq:
+                    result.append((seq, data))
+        return result
+
     def bind_loop(self, loop):
         """Store the asyncio event loop for thread→async signalling."""
         self._event_loop = loop
@@ -173,10 +187,27 @@ class RelayBridge:
 
                 while self.running:
                     compressed = recv_frame(sock)
-                    jpeg = self._dctx_screen.decompress(compressed)
+                    data = self._dctx_screen.decompress(compressed)
+
+                    # Detect format: WebM init (EBML) or JPEG
+                    is_ebml = len(data) >= 4 and data[:4] == b'\x1a\x45\xdf\xa3'
+                    is_jpeg = len(data) >= 2 and data[0] == 0xFF and data[1] == 0xD8
+
+                    if is_ebml:
+                        self.stream_init_segment = data
+                        self._chunk_queue.clear()
+                        self._is_stream = True
+                    elif is_jpeg:
+                        self._is_stream = False
+                        self.stream_init_segment = None
+                        self._chunk_queue.clear()
+
                     with self._frame_lock:
-                        self.latest_frame = jpeg
+                        self.latest_frame = data
                         self.frame_seq += 1
+                        if self._is_stream:
+                            self._chunk_queue.append((self.frame_seq, data))
+
                     self._frame_event.set()  # wake up waiting WS handlers
                     self._signal_viewers()  # notify async viewer handlers
 
@@ -457,28 +488,49 @@ class WebViewerApp:
         last_seq = 0
         my_event = asyncio.Event()
         self.bridge.register_viewer_event(my_event)
+
+        # If currently in stream mode, send init segment first
+        if self.bridge._is_stream and self.bridge.stream_init_segment:
+            try:
+                await ws.send_bytes(self.bridge.stream_init_segment)
+            except Exception:
+                pass
+
         try:
             while not ws.closed and self.bridge.running:
-                frame = None
-                with self.bridge._frame_lock:
-                    if self.bridge.frame_seq > last_seq:
-                        frame = self.bridge.latest_frame
-                        last_seq = self.bridge.frame_seq
-
-                if frame:
-                    await ws.send_bytes(frame)
-                    # No sleep — send next frame as soon as available
+                if self.bridge._is_stream:
+                    # Stream mode: sequential chunk delivery (all chunks in order)
+                    chunks = self.bridge.get_chunks_since(last_seq)
+                    for seq, data in chunks:
+                        if ws.closed:
+                            break
+                        await ws.send_bytes(data)
+                        last_seq = seq
+                    if not chunks:
+                        my_event.clear()
+                        try:
+                            await asyncio.wait_for(my_event.wait(), timeout=0.05)
+                        except asyncio.TimeoutError:
+                            pass
                 else:
-                    # Pure-async wait: no thread-pool overhead
-                    my_event.clear()
-                    # Double-check after clear to avoid race
+                    # JPEG mode: latest frame only (skip old frames)
+                    frame = None
                     with self.bridge._frame_lock:
                         if self.bridge.frame_seq > last_seq:
-                            continue
-                    try:
-                        await asyncio.wait_for(my_event.wait(), timeout=0.05)
-                    except asyncio.TimeoutError:
-                        pass
+                            frame = self.bridge.latest_frame
+                            last_seq = self.bridge.frame_seq
+
+                    if frame:
+                        await ws.send_bytes(frame)
+                    else:
+                        my_event.clear()
+                        with self.bridge._frame_lock:
+                            if self.bridge.frame_seq > last_seq:
+                                continue
+                        try:
+                            await asyncio.wait_for(my_event.wait(), timeout=0.05)
+                        except asyncio.TimeoutError:
+                            pass
         except (ConnectionResetError, asyncio.CancelledError):
             pass
         except Exception as exc:
