@@ -22,7 +22,7 @@ MSG_KICK_SHARER = "kick_sharer"      # Server → Client: you've been replaced
 MSG_SERVER_INFO = "server_info"      # Server → Client: server status
 
 # Screen capture
-SCREEN_FPS = 60
+SCREEN_FPS = 30
 SCREEN_QUALITY = 100  # JPEG quality (1-100) – maximum quality
 SCREEN_RESIZE_FACTOR = 1.0  # 1.0 = full resolution
 VIDEO_BITRATE = 8000  # Target bitrate in kbps (higher for LAN clarity)

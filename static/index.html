@@ -157,6 +157,22 @@
         /* Fullscreen tweaks */
         body.fs .toolbar,
         body.fs .statusbar { display: none; }
+        body.fs .canvas-wrap {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 50;
+            background: #000;
+            cursor: none;
+        }
+        body.fs #screen-canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+        body.fs .canvas-wrap:hover { cursor: none; }
+        body.fs .canvas-wrap.show-cursor { cursor: default; }
 
         /* ── Share panel ── */
         .share-panel {
@@ -423,10 +439,10 @@
     <div class="hint">95-100% = near-lossless. Lower values save bandwidth.</div>
     <div class="setting-row">
         <span class="setting-label">Max FPS</span>
-        <input type="range" id="set-fps" min="5" max="60" value="60" step="5">
-        <span class="setting-value" id="set-fps-val">60</span>
+        <input type="range" id="set-fps" min="5" max="60" value="30" step="5">
+        <span class="setting-value" id="set-fps-val">30</span>
     </div>
-    <div class="hint">60 FPS for buttery-smooth. Lower saves CPU/bandwidth.</div>
+    <div class="hint">30 FPS — best quality. Higher uses more CPU/bandwidth.</div>
     <div class="setting-row">
         <span class="setting-label">&#x1F4CA; Stats</span>
         <span class="setting-value" id="set-stats" style="min-width:auto;font-weight:400;color:#808098">—</span>
@@ -492,10 +508,10 @@
     /* ── Quality Settings (user-adjustable, persisted in localStorage) ── */
     const VIDEO_BITRATE_KBPS = 8000;  // Target bitrate budget in kbps (LAN generous)
     const PRESETS = {
-        performance: { maxDim: 1280, jpegQ: 0.60, fps: 20, bitrate: 3000 },
-        balanced:    { maxDim: 1920, jpegQ: 0.85, fps: 30, bitrate: 6000 },
-        quality:     { maxDim: 1920, jpegQ: 1.00, fps: 60, bitrate: 8000 },
-        ultra:       { maxDim: 9999, jpegQ: 1.00, fps: 60, bitrate: 15000 },
+        performance: { maxDim: 1280, jpegQ: 0.60, fps: 15, bitrate: 3000 },
+        balanced:    { maxDim: 1920, jpegQ: 0.85, fps: 24, bitrate: 6000 },
+        quality:     { maxDim: 1920, jpegQ: 1.00, fps: 30, bitrate: 8000 },
+        ultra:       { maxDim: 9999, jpegQ: 1.00, fps: 30, bitrate: 15000 },
     };
     const DEFAULT_SETTINGS = { ...PRESETS.quality, preset: 'quality' };
 
@@ -952,6 +968,17 @@
         document.body.classList.toggle("fs", !!document.fullscreenElement);
     });
 
+    // Auto-hide cursor in fullscreen after 2s of inactivity
+    let _fsCursorTimer = null;
+    canvasWrap.addEventListener("mousemove", () => {
+        if (!document.fullscreenElement) return;
+        canvasWrap.classList.add("show-cursor");
+        clearTimeout(_fsCursorTimer);
+        _fsCursorTimer = setTimeout(() => {
+            canvasWrap.classList.remove("show-cursor");
+        }, 2000);
+    });
+
     document.addEventListener("keydown", (e) => {
         if (e.key === "F11")   { e.preventDefault(); toggleFs(); }
         if (e.key === "Escape" && document.fullscreenElement) document.exitFullscreen();
@@ -967,12 +994,9 @@
         lastFpsTs = now;
     }, 1000);
 
-    /* ── Canvas resize ── */
-    const ro = new ResizeObserver(() => {
-        canvas.width  = canvasWrap.clientWidth;
-        canvas.height = canvasWrap.clientHeight;
-    });
-    ro.observe(canvasWrap);
+    /* Canvas pixel size is set by the frame renderer to match the
+       incoming image.  CSS (object-fit: contain) handles visual
+       scaling, especially in fullscreen mode. */
 
     /* ────────────────────────────────
        SCREEN SHARING (browser → server)
@@ -1157,7 +1181,7 @@
                 video: {
                     width:  { ideal: 1920 },
                     height: { ideal: 1080 },
-                    frameRate: { ideal: 60 },
+                    frameRate: { ideal: 30 },
                 },
             };
             if (includeAudio) {
@@ -1735,7 +1759,7 @@
                 }
                 params.encodings[0].maxBitrate = rtcConfig.maxBitrate || 15_000_000;
                 // Prefer high resolution & framerate
-                params.encodings[0].maxFramerate = shareSettings.fps || 60;
+                params.encodings[0].maxFramerate = shareSettings.fps || 30;
                 params.encodings[0].priority = "high";
                 params.encodings[0].networkPriority = "high";
                 await sender.setParameters(params);
