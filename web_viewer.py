@@ -11,10 +11,12 @@ Usage:
 
 import asyncio
 import collections
+import ipaddress
 import json
 import logging
 import os
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -608,8 +610,9 @@ class WebViewerApp:
 
     # ── run ──
 
-    def run(self):
-        web.run_app(self.app, host="0.0.0.0", port=self.web_port)
+    def run(self, ssl_context=None):
+        web.run_app(self.app, host="0.0.0.0", port=self.web_port,
+                    ssl_context=ssl_context)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -627,6 +630,61 @@ def get_local_ip():
         return "127.0.0.1"
 
 
+def _generate_self_signed_cert(cert_path, key_path):
+    """Generate a self-signed certificate for HTTPS."""
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        import datetime
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, "LAN Screen Share"),
+        ])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + datetime.timedelta(days=3650))
+            .add_extension(
+                x509.SubjectAlternativeName([
+                    x509.DNSName("localhost"),
+                    x509.DNSName("*"),
+                    x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+                    x509.IPAddress(ipaddress.IPv4Address("0.0.0.0")),
+                ]),
+                critical=False,
+            )
+            .sign(key, hashes.SHA256())
+        )
+
+        with open(key_path, "wb") as f:
+            f.write(key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            ))
+        with open(cert_path, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+
+        log.info("Generated self-signed certificate: %s", cert_path)
+        return True
+    except ImportError:
+        log.warning("'cryptography' package not installed — cannot auto-generate SSL cert.")
+        log.warning("Install with:  pip install cryptography")
+        log.warning("Falling back to HTTP (browser sharing will NOT work on remote clients).")
+        return False
+    except Exception as exc:
+        log.warning("Failed to generate self-signed cert: %s", exc)
+        return False
+
+
 def main():
     import argparse
 
@@ -639,6 +697,12 @@ def main():
     parser.add_argument("--screen-port", type=int, default=SCREEN_PORT)
     parser.add_argument("--audio-port", type=int, default=AUDIO_PORT)
     parser.add_argument("--control-port", type=int, default=CONTROL_PORT)
+    parser.add_argument("--ssl-cert",
+                        help="Path to SSL certificate (PEM). Auto-generated if omitted.")
+    parser.add_argument("--ssl-key",
+                        help="Path to SSL private key (PEM). Auto-generated if omitted.")
+    parser.add_argument("--no-ssl", action="store_true",
+                        help="Disable HTTPS (browser sharing won't work remotely)")
     args = parser.parse_args()
 
     relay_host = args.host
@@ -659,12 +723,43 @@ def main():
                 print("No host specified. Exiting.")
                 return
 
+    # ── SSL setup ──
+    ssl_ctx = None
+    scheme = "http"
+    if not args.no_ssl:
+        cert_path = args.ssl_cert
+        key_path = args.ssl_key
+        if cert_path and key_path:
+            # User-provided cert
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_ctx.load_cert_chain(cert_path, key_path)
+            scheme = "https"
+        else:
+            # Auto-generate self-signed cert
+            auto_cert = os.path.join(BASE_DIR, "cert.pem")
+            auto_key = os.path.join(BASE_DIR, "key.pem")
+            need_gen = not (os.path.exists(auto_cert) and os.path.exists(auto_key))
+            if need_gen:
+                ok = _generate_self_signed_cert(auto_cert, auto_key)
+            else:
+                ok = True
+            if ok:
+                ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ssl_ctx.load_cert_chain(auto_cert, auto_key)
+                scheme = "https"
+
     local_ip = get_local_ip()
     print(f"\n{'=' * 55}")
     print(f"  LAN Screen Share — Web Viewer")
     print(f"{'=' * 55}")
     print(f"  Relay server : {relay_host}")
-    print(f"  Web UI       : http://{local_ip}:{args.web_port}")
+    print(f"  Web UI       : {scheme}://{local_ip}:{args.web_port}")
+    if scheme == "https":
+        print(f"  SSL          : enabled (self-signed)")
+        print(f"  NOTE: Accept the browser certificate warning on first visit.")
+    else:
+        print(f"  SSL          : disabled")
+        print(f"  WARNING: Screen sharing from browser requires HTTPS.")
     print(f"{'=' * 55}")
     print(f"\n  Open the URL above in any browser to view.\n")
 
@@ -678,7 +773,7 @@ def main():
 
     server = WebViewerApp(bridge, web_port=args.web_port)
     try:
-        server.run()
+        server.run(ssl_context=ssl_ctx)
     except KeyboardInterrupt:
         print("\nStopping...")
     finally:

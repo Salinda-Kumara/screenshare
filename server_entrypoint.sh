@@ -13,7 +13,7 @@ echo "  Discovery : 9876/udp"
 echo "  Screen    : 9877/tcp"
 echo "  Audio     : 9878/tcp"
 echo "  Control   : 9879/tcp"
-echo "  Web UI    : 1000/tcp  (open in browser)"
+echo "  Web UI    : 1000/tcp  (HTTPS — open in browser)"
 echo ""
 echo "============================================"
 

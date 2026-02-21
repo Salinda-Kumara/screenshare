@@ -675,6 +675,15 @@
 
         setShareStatus("Requesting screen access…", false);
 
+        // Check for secure context (HTTPS required for getDisplayMedia)
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+            setShareStatus(
+                "Screen sharing requires HTTPS. Access this page via https:// instead of http://.",
+                true
+            );
+            return;
+        }
+
         try {
             // Request screen capture
             const constraints = { video: { cursor: "always" } };
