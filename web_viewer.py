@@ -450,7 +450,7 @@ class WebViewerApp:
     # ── Screen WebSocket ──
 
     async def _handle_ws_screen(self, request):
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(compress=False)
         await ws.prepare(request)
         log.info("Browser screen WS connected (%s)", request.remote)
 
@@ -491,7 +491,7 @@ class WebViewerApp:
     # ── Audio WebSocket ──
 
     async def _handle_ws_audio(self, request):
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(compress=False)
         await ws.prepare(request)
         log.info("Browser audio WS connected (%s)", request.remote)
 
@@ -517,7 +517,7 @@ class WebViewerApp:
     # ── Control WebSocket ──
 
     async def _handle_ws_control(self, request):
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(compress=False)
         await ws.prepare(request)
         log.info("Browser control WS connected (%s)", request.remote)
 
@@ -580,7 +580,7 @@ class WebViewerApp:
     # ── Sharer Screen WebSocket ──
 
     async def _handle_ws_share_screen(self, request):
-        ws = web.WebSocketResponse(max_msg_size=10 * 1024 * 1024)  # 10MB
+        ws = web.WebSocketResponse(max_msg_size=10 * 1024 * 1024, compress=False)  # 10MB
         await ws.prepare(request)
 
         name = request.query.get("name", f"Browser ({request.remote})")
@@ -635,7 +635,7 @@ class WebViewerApp:
     # ── Sharer Audio WebSocket ──
 
     async def _handle_ws_share_audio(self, request):
-        ws = web.WebSocketResponse(max_msg_size=1 * 1024 * 1024)  # 1MB
+        ws = web.WebSocketResponse(max_msg_size=1 * 1024 * 1024, compress=False)  # 1MB
         await ws.prepare(request)
 
         name = request.query.get("name", f"Browser ({request.remote})")

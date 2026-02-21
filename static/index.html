@@ -342,6 +342,7 @@
         const ws = new WebSocket(`${proto}//${location.host}/ws/screen`);
         ws.binaryType = "blob";
 
+        let lastFrameTime = 0;
         ws.onmessage = async (ev) => {
             if (rendering) return;           // skip if prev frame still decoding
             rendering = true;
@@ -506,7 +507,7 @@
 
     function _initScriptProcessor() {
         // 0 input channels = pure generator (no input source needed)
-        processor = audioCtx.createScriptProcessor(4096, 0, 1);
+        processor = audioCtx.createScriptProcessor(2048, 0, 1);
         processor.onaudioprocess = (e) => {
             const out = e.outputBuffer.getChannelData(0);
             _fillBuffer(out);
@@ -874,9 +875,9 @@
         const offCanvas = document.createElement("canvas");
         const offCtx = offCanvas.getContext("2d", { alpha: false });
 
-        const MAX_DIM = 1920;  // Full HD cap
+        const MAX_DIM = 1600;  // cap for faster encode/transmit
         const INTERVAL = 16;   // low-latency (~60 cap, sending flag throttles actual rate)
-        const JPEG_Q = 0.7;    // Higher quality
+        const JPEG_Q = 0.6;    // balanced quality/latency
         let sending = false;
         let lastW = 0, lastH = 0;  // Track size to avoid resetting canvas each frame
 
@@ -935,6 +936,11 @@
             sending = true;
             offCanvas.toBlob((blob) => {
                 if (blob && sharing && shareScreenWs && shareScreenWs.readyState === WebSocket.OPEN) {
+                    // Skip if network is congested (>2 frames queued)
+                    if (shareScreenWs.bufferedAmount > blob.size * 2) {
+                        sending = false;
+                        return;
+                    }
                     blob.arrayBuffer().then(buf => {
                         try { shareScreenWs.send(buf); } catch(_) {}
                         sending = false;
@@ -972,7 +978,7 @@
             const source = shareAudioCtx.createMediaStreamSource(stream);
 
             // Use ScriptProcessor to get raw PCM
-            shareAudioProc = shareAudioCtx.createScriptProcessor(4096, 1, 1);
+            shareAudioProc = shareAudioCtx.createScriptProcessor(2048, 1, 1);
             shareAudioProc.onaudioprocess = (e) => {
                 if (!sharing || !shareAudioWs || shareAudioWs.readyState !== WebSocket.OPEN) return;
                 const f32 = e.inputBuffer.getChannelData(0);
