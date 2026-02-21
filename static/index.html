@@ -876,17 +876,24 @@
         const offCtx = offCanvas.getContext("2d");
 
         const MAX_DIM = 1280;  // Cap resolution for faster encoding
-        const MIN_INTERVAL = 50;  // ~20 FPS max
+        const INTERVAL = 50;   // ~20 FPS
         let sending = false;
-        let lastSendTime = 0;
-        let rafId = null;
 
-        function captureLoop(ts) {
-            if (!sharing) return;
-            rafId = requestAnimationFrame(captureLoop);
+        // Use a Web Worker for timing so capture continues in background tabs
+        const workerCode = `
+            let iv = null;
+            onmessage = (e) => {
+                if (e.data === "start") { iv = setInterval(() => postMessage("tick"), ${INTERVAL}); }
+                if (e.data === "stop")  { clearInterval(iv); iv = null; }
+            };
+        `;
+        const workerBlob = new Blob([workerCode], { type: "application/javascript" });
+        const workerUrl = URL.createObjectURL(workerBlob);
+        const timerWorker = new Worker(workerUrl);
+        URL.revokeObjectURL(workerUrl);
 
-            if (sending) return;
-            if (ts - lastSendTime < MIN_INTERVAL) return;
+        function captureFrame() {
+            if (!sharing || sending) return;
             if (video.videoWidth === 0) return;
             if (!shareScreenWs || shareScreenWs.readyState !== WebSocket.OPEN) return;
 
@@ -919,7 +926,6 @@
             }
 
             sending = true;
-            lastSendTime = ts;
             offCanvas.toBlob((blob) => {
                 if (blob && sharing && shareScreenWs && shareScreenWs.readyState === WebSocket.OPEN) {
                     blob.arrayBuffer().then(buf => {
@@ -932,9 +938,16 @@
             }, "image/jpeg", 0.5);
         }
 
-        rafId = requestAnimationFrame(captureLoop);
-        // Store cleanup handle — use shareCaptureId as an object for rAF
-        shareCaptureId = { cancel() { if (rafId) cancelAnimationFrame(rafId); rafId = null; } };
+        timerWorker.onmessage = captureFrame;
+        timerWorker.postMessage("start");
+
+        // Store cleanup handle
+        shareCaptureId = {
+            cancel() {
+                timerWorker.postMessage("stop");
+                timerWorker.terminate();
+            }
+        };
     }
 
     function _startAudioCapture(stream) {
