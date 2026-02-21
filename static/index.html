@@ -401,9 +401,9 @@
         <select id="set-resolution">
             <option value="1024">1024px (fastest)</option>
             <option value="1280">1280px (fast)</option>
-            <option value="1600">1600px (balanced)</option>
-            <option value="1920">1920px (HD)</option>
-            <option value="9999" selected>Original (no limit)</option>
+            <option value="1600">1600px</option>
+            <option value="1920" selected>1920px (Full HD)</option>
+            <option value="9999">Original (no limit)</option>
         </select>
     </div>
     <div class="setting-row">
@@ -478,8 +478,8 @@
     /* ── Quality Settings (user-adjustable, persisted in localStorage) ── */
     const PRESETS = {
         performance: { maxDim: 1280, jpegQ: 0.55, fps: 20 },
-        balanced:    { maxDim: 1920, jpegQ: 0.75, fps: 30 },
-        quality:     { maxDim: 9999, jpegQ: 0.95, fps: 60 },
+        balanced:    { maxDim: 1920, jpegQ: 0.80, fps: 30 },
+        quality:     { maxDim: 1920, jpegQ: 0.95, fps: 60 },
         ultra:       { maxDim: 9999, jpegQ: 1.00, fps: 60 },
     };
     const DEFAULT_SETTINGS = { ...PRESETS.quality, preset: 'quality' };
@@ -997,8 +997,14 @@
         }
 
         try {
-            // Request screen capture with standard constraints
-            const constraints = { video: true };
+            // Request screen capture at maximum quality
+            const constraints = {
+                video: {
+                    width:  { ideal: 1920 },
+                    height: { ideal: 1080 },
+                    frameRate: { ideal: 60 },
+                },
+            };
             if (includeAudio) {
                 constraints.audio = {
                     echoCancellation: false,
