@@ -685,16 +685,8 @@
         }
 
         try {
-            // Request screen capture — prefer full-screen, not just this tab
-            const constraints = {
-                video: {
-                    cursor: "always",
-                },
-                preferCurrentTab: false,              // don't default to this tab
-                selfBrowserSurface: "exclude",        // hide this tab from picker
-                surfaceSwitching: "include",          // allow switching while sharing
-                monitorTypeSurfaces: "include",       // always show full-screen option
-            };
+            // Request screen capture with standard constraints
+            const constraints = { video: true };
             if (includeAudio) {
                 constraints.audio = {
                     echoCancellation: false,
@@ -703,7 +695,6 @@
                     sampleRate: 44100,
                     channelCount: 1,
                 };
-                constraints.systemAudio = "include";  // request system audio
             }
             shareStream = await navigator.mediaDevices.getDisplayMedia(constraints);
         } catch (err) {
