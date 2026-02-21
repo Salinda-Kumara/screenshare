@@ -27,8 +27,8 @@ SCREEN_QUALITY = 92  # JPEG quality (1-100)
 SCREEN_RESIZE_FACTOR = 1.0  # 1.0 = full resolution
 
 # Audio
-AUDIO_RATE = 44100
-AUDIO_CHANNELS = 1  # Mono for lower bandwidth
+AUDIO_RATE = 48000
+AUDIO_CHANNELS = 2  # Stereo for full quality
 AUDIO_CHUNK = 4096
 AUDIO_FORMAT_WIDTH = 2  # 16-bit audio
 

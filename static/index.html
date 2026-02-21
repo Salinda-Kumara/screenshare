@@ -469,8 +469,8 @@
     const sbServer    = document.getElementById("sb-server");
 
     /* ── Config ── */
-    const AUDIO_RATE     = 44100;
-    const AUDIO_CHANNELS = 1;
+    const AUDIO_RATE     = 48000;
+    const AUDIO_CHANNELS = 2;
     const RECONNECT_MS   = 2000;
 
     /* ── Quality Settings (user-adjustable, persisted in localStorage) ── */
@@ -668,18 +668,25 @@
 
         audioWs.onmessage = (ev) => {
             if (!audioStarted || muted) return;
-            // int16 PCM → float32
+            // int16 interleaved stereo PCM → deinterleave to per-channel float32
             const i16 = new Int16Array(ev.data);
-            const f32 = new Float32Array(i16.length);
-            for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768.0;
+            const samplesPerCh = i16.length / AUDIO_CHANNELS;
+            const channels = [];
+            for (let ch = 0; ch < AUDIO_CHANNELS; ch++) {
+                channels.push(new Float32Array(samplesPerCh));
+            }
+            for (let i = 0; i < samplesPerCh; i++) {
+                for (let ch = 0; ch < AUDIO_CHANNELS; ch++) {
+                    channels[ch][i] = i16[i * AUDIO_CHANNELS + ch] / 32768.0;
+                }
+            }
 
             // Send to AudioWorklet (preferred) or queue for ScriptProcessor
             if (window._audioWorkletPort) {
-                window._audioWorkletPort.postMessage(f32);
+                window._audioWorkletPort.postMessage({ channels });
             } else {
-                audioQueue.push(f32);
-                // Keep ~0.5s buffer max at 44100 Hz (~5 chunks of 4096)
-                while (audioQueue.length > 10) { audioQueue.shift(); audioOffset = 0; }
+                audioQueue.push(channels);
+                while (audioQueue.length > 20) { audioQueue.shift(); audioOffset = 0; }
             }
         };
 
@@ -778,11 +785,14 @@
     }
 
     function _initScriptProcessor() {
-        // 0 input channels = pure generator (no input source needed)
-        processor = audioCtx.createScriptProcessor(2048, 0, 1);
+        // Stereo output generator
+        processor = audioCtx.createScriptProcessor(4096, 0, AUDIO_CHANNELS);
         processor.onaudioprocess = (e) => {
-            const out = e.outputBuffer.getChannelData(0);
-            _fillBuffer(out);
+            const outs = [];
+            for (let ch = 0; ch < AUDIO_CHANNELS; ch++) {
+                outs.push(e.outputBuffer.getChannelData(ch));
+            }
+            _fillBuffer(outs);
         };
         processor.connect(gainNode);
     }
@@ -796,24 +806,34 @@
                     this._queue = [];
                     this._offset = 0;
                     this.port.onmessage = (e) => {
-                        this._queue.push(e.data);
-                        // Cap buffer at ~0.5s
-                        while (this._queue.length > 10) { this._queue.shift(); this._offset = 0; }
+                        this._queue.push(e.data.channels);
+                        // Cap buffer at ~1s
+                        while (this._queue.length > 25) { this._queue.shift(); this._offset = 0; }
                     };
                 }
                 process(inputs, outputs) {
-                    const out = outputs[0][0];
+                    const numCh = outputs[0].length;
+                    const len = outputs[0][0].length;
                     let w = 0;
-                    while (w < out.length && this._queue.length > 0) {
+                    while (w < len && this._queue.length > 0) {
                         const chunk = this._queue[0];
-                        const avail = chunk.length - this._offset;
-                        const n = Math.min(avail, out.length - w);
-                        for (let i = 0; i < n; i++) out[w + i] = chunk[this._offset + i];
+                        const chunkLen = chunk[0].length;
+                        const avail = chunkLen - this._offset;
+                        const n = Math.min(avail, len - w);
+                        for (let ch = 0; ch < numCh && ch < chunk.length; ch++) {
+                            const outCh = outputs[0][ch];
+                            const srcCh = chunk[ch];
+                            for (let i = 0; i < n; i++) outCh[w + i] = srcCh[this._offset + i];
+                        }
                         w += n;
                         this._offset += n;
-                        if (this._offset >= chunk.length) { this._queue.shift(); this._offset = 0; }
+                        if (this._offset >= chunkLen) { this._queue.shift(); this._offset = 0; }
                     }
-                    for (let i = w; i < out.length; i++) out[i] = 0;
+                    // Fill remainder with silence
+                    for (let ch = 0; ch < numCh; ch++) {
+                        const outCh = outputs[0][ch];
+                        for (let i = w; i < len; i++) outCh[i] = 0;
+                    }
                     return true;
                 }
             }
@@ -824,7 +844,9 @@
 
         try {
             await audioCtx.audioWorklet.addModule(url);
-            const workletNode = new AudioWorkletNode(audioCtx, "pcm-player-processor");
+            const workletNode = new AudioWorkletNode(audioCtx, "pcm-player-processor", {
+                outputChannelCount: [AUDIO_CHANNELS]
+            });
             workletNode.connect(gainNode);
 
             // Override: push audio chunks to the worklet via MessagePort
@@ -837,18 +859,25 @@
         }
     }
 
-    function _fillBuffer(out) {
+    function _fillBuffer(outs) {
+        const len = outs[0].length;
+        const numCh = outs.length;
         let w = 0;
-        while (w < out.length && audioQueue.length > 0) {
-            const chunk = audioQueue[0];
-            const avail = chunk.length - audioOffset;
-            const n = Math.min(avail, out.length - w);
-            for (let i = 0; i < n; i++) out[w + i] = chunk[audioOffset + i];
+        while (w < len && audioQueue.length > 0) {
+            const chunk = audioQueue[0]; // array of Float32Array per channel
+            const chunkLen = chunk[0].length;
+            const avail = chunkLen - audioOffset;
+            const n = Math.min(avail, len - w);
+            for (let ch = 0; ch < numCh && ch < chunk.length; ch++) {
+                for (let i = 0; i < n; i++) outs[ch][w + i] = chunk[ch][audioOffset + i];
+            }
             w += n;
             audioOffset += n;
-            if (audioOffset >= chunk.length) { audioQueue.shift(); audioOffset = 0; }
+            if (audioOffset >= chunkLen) { audioQueue.shift(); audioOffset = 0; }
         }
-        for (let i = w; i < out.length; i++) out[i] = 0;
+        for (let ch = 0; ch < numCh; ch++) {
+            for (let i = w; i < len; i++) outs[ch][i] = 0;
+        }
     }
 
     /* ────────────────────────────────
@@ -964,8 +993,8 @@
                     echoCancellation: false,
                     noiseSuppression: false,
                     autoGainControl: false,
-                    sampleRate: 44100,
-                    channelCount: 1,
+                    sampleRate: 48000,
+                    channelCount: 2,
                 };
             }
             shareStream = await navigator.mediaDevices.getDisplayMedia(constraints);
@@ -1343,19 +1372,24 @@
 
     function _startAudioCapture(stream) {
         try {
-            shareAudioCtx = new AudioContext({ sampleRate: 44100 });
+            shareAudioCtx = new AudioContext({ sampleRate: 48000 });
             const source = shareAudioCtx.createMediaStreamSource(stream);
 
-            // Use ScriptProcessor to get raw PCM
-            shareAudioProc = shareAudioCtx.createScriptProcessor(2048, 1, 1);
+            // Stereo capture: ScriptProcessor with 2 input channels
+            shareAudioProc = shareAudioCtx.createScriptProcessor(4096, 2, 2);
             shareAudioProc.onaudioprocess = (e) => {
                 if (!sharing || !shareAudioWs || shareAudioWs.readyState !== WebSocket.OPEN) return;
-                const f32 = e.inputBuffer.getChannelData(0);
-                // Convert float32 → int16 PCM
-                const i16 = new Int16Array(f32.length);
-                for (let i = 0; i < f32.length; i++) {
-                    let s = Math.max(-1, Math.min(1, f32[i]));
-                    i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                const ch0 = e.inputBuffer.getChannelData(0);
+                const ch1 = e.inputBuffer.numberOfChannels >= 2
+                    ? e.inputBuffer.getChannelData(1) : ch0;
+                // Interleave stereo float32 → int16 PCM
+                const frames = ch0.length;
+                const i16 = new Int16Array(frames * 2);
+                for (let i = 0; i < frames; i++) {
+                    let sL = Math.max(-1, Math.min(1, ch0[i]));
+                    let sR = Math.max(-1, Math.min(1, ch1[i]));
+                    i16[i * 2]     = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
+                    i16[i * 2 + 1] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
                 }
                 try { shareAudioWs.send(i16.buffer); } catch(_) {}
             };
