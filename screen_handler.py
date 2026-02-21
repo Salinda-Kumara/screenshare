@@ -110,16 +110,7 @@ class ScreenCapture:
                         h, w = frame.shape[:2]
                         new_w = int(w * self.resize_factor)
                         new_h = int(h * self.resize_factor)
-                        frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-                    # Scale to 1920x1080 if larger (aspect-ratio aware)
-                    h, w = frame.shape[:2]
-                    target_w, target_h = 1920, 1080
-                    if w > target_w or h > target_h:
-                        scale = min(target_w / w, target_h / h)
-                        new_w = int(w * scale)
-                        new_h = int(h * scale)
-                        frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                        frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 
                     # Encode to JPEG at full quality (LAN has plenty of bandwidth)
                     _, buffer = cv2.imencode('.jpg', frame,
