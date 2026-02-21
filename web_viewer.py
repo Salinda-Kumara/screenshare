@@ -35,8 +35,7 @@ from config import (
     ROLE_VIEWER, ROLE_SHARER, MSG_SELECT_SHARER, MSG_SHARER_LIST,
     CONNECT_TIMEOUT, RECV_TIMEOUT, WEB_PORT,
     WEBRTC_ENABLED, WEBRTC_SIGNALING_PATH,
-    WEBRTC_VIDEO_BITRATE, WEBRTC_MAX_BITRATE, WEBRTC_MIN_BITRATE,
-    WEBRTC_PREFERRED_CODECS, WEBRTC_AUDIO_BITRATE, WEBRTC_ICE_SERVERS,
+    WEBRTC_PREFERRED_CODECS, WEBRTC_ICE_SERVERS,
 )
 from network_utils import configure_socket, send_frame, recv_frame
 from discovery import DiscoveryClient
@@ -477,11 +476,7 @@ class WebViewerApp:
         return web.json_response({
             "enabled": WEBRTC_ENABLED,
             "iceServers": WEBRTC_ICE_SERVERS,
-            "videoBitrate": WEBRTC_VIDEO_BITRATE,
-            "maxBitrate": WEBRTC_MAX_BITRATE,
-            "minBitrate": WEBRTC_MIN_BITRATE,
             "preferredCodecs": WEBRTC_PREFERRED_CODECS,
-            "audioBitrate": WEBRTC_AUDIO_BITRATE,
         })
 
     async def _handle_debug(self, request):

@@ -506,12 +506,11 @@
     const RECONNECT_MS   = 2000;
 
     /* ── Quality Settings (user-adjustable, persisted in localStorage) ── */
-    const VIDEO_BITRATE_KBPS = 8000;  // Target bitrate budget in kbps (LAN generous)
     const PRESETS = {
-        performance: { maxDim: 1280, jpegQ: 0.60, fps: 15, bitrate: 3000 },
-        balanced:    { maxDim: 1920, jpegQ: 0.85, fps: 24, bitrate: 6000 },
-        quality:     { maxDim: 1920, jpegQ: 1.00, fps: 30, bitrate: 8000 },
-        ultra:       { maxDim: 9999, jpegQ: 1.00, fps: 30, bitrate: 15000 },
+        performance: { maxDim: 1280, jpegQ: 0.60, fps: 15 },
+        balanced:    { maxDim: 1920, jpegQ: 0.85, fps: 24 },
+        quality:     { maxDim: 1920, jpegQ: 1.00, fps: 30 },
+        ultra:       { maxDim: 9999, jpegQ: 1.00, fps: 30 },
     };
     const DEFAULT_SETTINGS = { ...PRESETS.quality, preset: 'quality' };
 
@@ -1753,7 +1752,8 @@
                 if (!params.encodings || params.encodings.length === 0) {
                     params.encodings = [{}];
                 }
-                params.encodings[0].maxBitrate = rtcConfig.audioBitrate || 128_000;
+                // No bitrate cap on audio for LAN
+                params.encodings[0].maxBitrate = 512_000;  // 512kbps Opus (max quality)
                 await sender.setParameters(params);
             }
         }
