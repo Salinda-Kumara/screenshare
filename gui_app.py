@@ -23,7 +23,7 @@ from PIL import Image, ImageTk
 
 from config import (
     SCREEN_PORT, AUDIO_PORT, CONTROL_PORT,
-    SCREEN_FPS, SCREEN_QUALITY, SCREEN_RESIZE_FACTOR,
+    SCREEN_QUALITY, SCREEN_RESIZE_FACTOR,
     AUDIO_RATE, AUDIO_CHANNELS, AUDIO_CHUNK, AUDIO_FORMAT_WIDTH,
     ROLE_VIEWER, ROLE_SHARER,
     MSG_SHARER_LIST, MSG_SELECT_SHARER,
@@ -62,11 +62,11 @@ def get_local_ip():
 class ScreenSender:
     """Captures local screen and sends to relay server."""
 
-    def __init__(self, host, port, sharer_name, fps=SCREEN_FPS,
+    def __init__(self, host, port, sharer_name,
                  quality=SCREEN_QUALITY, resize=SCREEN_RESIZE_FACTOR):
         self.host, self.port = host, port
         self.sharer_name = sharer_name
-        self.fps, self.quality, self.resize = fps, quality, resize
+        self.quality, self.resize = quality, resize
         self.running = False
         self.sharer_id = None
         self.compressor = zstd.ZstdCompressor(level=1)
@@ -99,12 +99,9 @@ class ScreenSender:
             # (We don't get an explicit id back — the server assigns it internally.
             #  We'll use the control channel to learn our id.)
 
-            interval = 1.0 / self.fps
             with mss.mss() as sct:
                 monitor = sct.monitors[0]
                 while self.running:
-                    t0 = time.perf_counter()
-
                     screenshot = sct.grab(monitor)
                     frame = np.array(screenshot)
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
@@ -121,10 +118,6 @@ class ScreenSender:
 
                     if not send_frame(sock, compressed):
                         break
-
-                    elapsed = time.perf_counter() - t0
-                    if elapsed < interval:
-                        time.sleep(interval - elapsed)
 
         except Exception as e:
             log.error("ScreenSender error: %s", e)
@@ -680,11 +673,6 @@ class App:
         q_sc = ttk.Scale(settings, from_=10, to=100, variable=self._quality_var, orient="horizontal")
         q_sc.grid(row=0, column=1, sticky="ew", padx=5, pady=4)
 
-        ttk.Label(settings, text="FPS:", style="Sub.TLabel").grid(row=1, column=0, sticky="w", padx=5, pady=4)
-        self._fps_var = tk.IntVar(value=60)
-        ttk.Combobox(settings, textvariable=self._fps_var, values=[10, 15, 20, 24, 30, 60],
-                      width=6, state="readonly").grid(row=1, column=1, sticky="w", padx=5, pady=4)
-
         # Audio device
         ttk.Label(settings, text="Audio:", style="Sub.TLabel").grid(row=2, column=0, sticky="w", padx=5, pady=4)
         self._audio_dev_var = tk.StringVar(value="Default")
@@ -722,7 +710,6 @@ class App:
     def _do_start_share(self):
         hostname = socket.gethostname()
         quality = self._quality_var.get()
-        fps = self._fps_var.get()
 
         dev_idx = None
         sel = self._audio_dev_var.get()
@@ -737,7 +724,7 @@ class App:
 
         try:
             self.screen_sender = ScreenSender(self.server_ip, sp, hostname,
-                                               fps=fps, quality=quality)
+                                               quality=quality)
             self.audio_sender = AudioSender(self.server_ip, ap, hostname,
                                              device_index=dev_idx)
             self.screen_sender.start()
