@@ -894,8 +894,11 @@ class App:
                         img = img.resize((nw, nh), Image.LANCZOS)
 
                 self._photo_ref = ImageTk.PhotoImage(img)
-                self._canvas.delete("all")
-                self._canvas.create_image(cw // 2, ch // 2, anchor="center", image=self._photo_ref)
+                if not hasattr(self, '_canvas_image_id') or self._canvas_image_id is None:
+                    self._canvas_image_id = self._canvas.create_image(cw // 2, ch // 2, anchor="center", image=self._photo_ref)
+                else:
+                    self._canvas.coords(self._canvas_image_id, cw // 2, ch // 2)
+                    self._canvas.itemconfigure(self._canvas_image_id, image=self._photo_ref)
             except Exception:
                 pass
 
