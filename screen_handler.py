@@ -11,7 +11,7 @@ import mss
 import zstandard as zstd
 
 from config import (
-    SCREEN_PORT, SCREEN_FPS, SCREEN_QUALITY,
+    SCREEN_PORT, SCREEN_QUALITY,
     SCREEN_RESIZE_FACTOR, CONNECT_TIMEOUT, RECV_TIMEOUT,
 )
 from network_utils import configure_socket, send_frame, recv_frame
@@ -22,10 +22,9 @@ log = logging.getLogger(__name__)
 class ScreenCapture:
     """Captures the screen and streams to connected viewers."""
 
-    def __init__(self, port=SCREEN_PORT, fps=SCREEN_FPS, quality=SCREEN_QUALITY,
+    def __init__(self, port=SCREEN_PORT, quality=SCREEN_QUALITY,
                  resize_factor=SCREEN_RESIZE_FACTOR):
         self.port = port
-        self.fps = fps
         self.quality = quality
         self.resize_factor = resize_factor
         self.running = False
@@ -40,7 +39,7 @@ class ScreenCapture:
         self._accept_thread.start()
         self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._capture_thread.start()
-        log.info("Screen capture started on port %d (FPS=%d, Q=%d)", self.port, self.fps, self.quality)
+        log.info("Screen capture started on port %d (Q=%d)", self.port, self.quality)
 
     def stop(self):
         self.running = False
@@ -89,14 +88,10 @@ class ScreenCapture:
                 break
 
     def _capture_loop(self):
-        interval = 1.0 / self.fps
-
         with mss.mss() as sct:
             monitor = sct.monitors[0]  # Full screen (all monitors combined)
 
             while self.running:
-                loop_start = time.perf_counter()
-
                 try:
                     # Capture with mss (much faster than ImageGrab)
                     screenshot = sct.grab(monitor)
@@ -125,11 +120,6 @@ class ScreenCapture:
 
                 except Exception as e:
                     log.debug("Capture error: %s", e)
-
-                elapsed = time.perf_counter() - loop_start
-                sleep_time = interval - elapsed
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
 
     def _broadcast(self, data):
         dead = []
